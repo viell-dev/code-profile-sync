@@ -81,6 +81,11 @@ Deviations from the design below, kept deliberately simple for the MVP:
 ## Remaining work / roadmap
 
 Near-term polish:
+- ⏳ **VSIX vendoring + `[extension_sources]` + version pinning** — switch vendored
+  artifact from unpacked folder to `.vsix`, `vendor/{vsix,extensions}` split, live external
+  sources, manifest-driven discovery, and first-class `id@version` pins/freeze. Designed in
+  [§4.1](#41-vsix-vendoring--extension_sources--version-pinning-designed-not-yet-implemented);
+  version pinning has open questions to resolve before implementing.
 - ✅ **JSON Schema + `docs/config.md`** — hand-maintained `schema/config.schema.json` +
   standalone `docs/config.md`; generated configs carry a `#:schema` directive (raw URL on
   `main`); a unit test guards schema/struct drift.
@@ -593,6 +598,97 @@ Reads always parse `extensions.json` + the shared dir directly. For writes:
   and recorded into the snapshot so it doesn't churn every run.
 - Binary resolution per editor: PATH lookup (`codium`/`code`/`cursor`) with a config
   override.
+
+### 4.1 VSIX vendoring + `[extension_sources]` + version pinning (designed, NOT yet implemented)
+
+Design agreed in discussion (2026-06-27); to be implemented next. Today's code vendors the
+**unpacked install folder** into `vendor/extensions/<rel>/` + a `.entry.json` sidecar,
+which drags `node_modules` trees into the config repo (e.g. `hansu.git-graph-2`). The plan
+below switches the canonical artifact to the `.vsix` and adds first-class non-marketplace
+sourcing. Some of it (version pinning) is a larger membership-model change with open
+questions — flagged below.
+
+**Decided:**
+
+- **Vendor the `.vsix`, not the unpacked folder.** Small, single-blob, content-hashable,
+  the canonical distributable. Restore via the editor CLI
+  (`<editor> --install-extension <vsix> --force`), which unpacks and writes correct
+  `relativeLocation`/`uuid`/`targetPlatform` metadata so we don't hand-reconstruct it. Keep
+  the existing folder-copy + hand-written-entry path as an **offline fallback** (no binary
+  / no vsix).
+- **Split the vendor store under the existing app-home `vendor/`:**
+  - `vendor/vsix/` — `.vsix` artifacts, **auto-discovered**, portable, the managed cache.
+    Filenames/discovery keyed by **`id + version + targetPlatform`** (read from the vsix
+    manifest `extension/package.json` inside the zip, *not* the filename — files may omit
+    the publisher, e.g. `git-graph-2-1.31.7.vsix`). Needs a `zip` dependency.
+  - `vendor/extensions/` — unpacked **fallback** folders (today's behavior; pull-captured
+    installs where no source vsix exists). `--config`-only layout mirrors this as
+    `.code-pm/vendor/{vsix,extensions}/`.
+- **`[extension_sources]` — top-level flat map for non-marketplace sources:**
+  ```toml
+  [extension_sources]
+  "hansu.git-graph-2" = "vendor/vsix/hansu.git-graph-2-1.31.7.vsix"
+  "corp.internal-tool" = "/mnt/corp/extensions/internal-tool.vsix"   # custom location
+  ```
+  Keyed by extension id so profiles keep referencing extensions by plain id in
+  `extensions`/`groups`/`[global]` (resolve() union/exclude logic unchanged — no parallel
+  membership set). Schema constrains values to `*.vsix`. **Semantics: a custom path here is
+  a _live external reference_** — re-read each run, **never copied** into the vendor dir
+  (the corporate-share case). Anything dropped in `vendor/vsix/` is auto-available without a
+  config entry. The two are orthogonal: `vendor/vsix/` = portable store that travels with
+  the repo; `extension_sources` = explicit "fetch from here, don't manage it."
+- **Restore resolution order for an id:** pool (installed → direct catalog edit) →
+  `extension_sources[id]` (live external vsix, explicit wins over implicit cache) →
+  `vendor/vsix/` (auto-discovered by id+version+targetPlatform) → `vendor/extensions/<rel>/`
+  (unpacked fallback) → editor CLI (Open VSX).
+- **Pull/sync workflow:** always copy the unpacked folder fallback (never blocks). When a
+  matching vsix (**same id+version+targetPlatform**) exists, skip the folder copy and prune
+  any existing fallback folder for that exact id+version. Same id but a *different* version
+  is an independent artifact — never pruned against another version.
+- **End-of-run report, two buckets (nudge, never force):** (1) folder-fallback packages →
+  "supply a `.vsix` to slim the repo"; (2) live-external packages → "not portable — sourced
+  from `<path>`", so the user knows the repo isn't self-contained for those (by choice). A
+  config leaning on `extension_sources` external paths is not reproducible on a machine that
+  lacks them; restore falls through to the next tier (CLI/Open VSX) and reports the miss
+  rather than failing.
+
+**Fork compatibility (some extensions only run in some forks).** No new config surface:
+- Per-editor config files (`vscodium.toml`, `code-oss.toml`) already separate fork-specific
+  sets; there is no cross-editor `[global]`. So an extension that only works in one fork is
+  simply listed in that fork's config. **Do not** add a per-extension "compatible forks"
+  field — it duplicates the per-editor file and we have no compat DB to validate it (that
+  data belongs in the deferred per-editor scope registry, §8).
+- Shared-pool isolation (§1.2): a vsix installed for one editor lands in the shared
+  `.vscode-oss` pool, but membership lists are separate and the tool only edits the target's
+  — so a fork-gated extension in the pool is inert for the other fork unless its config
+  lists the id. Failed installs are already reported and skipped (§4), covering genuine
+  engine/product rejections.
+- **Add a manifest pre-flight:** since we already crack `package.json` for
+  id+version+targetPlatform, also read `engines.vscode`; if the target editor's version
+  doesn't satisfy it, warn ("won't run on this editor") instead of surfacing a raw CLI
+  failure. The vendor cache key **must** include `targetPlatform` (native-binary extensions
+  ship `linux-x64` etc. builds) or two platforms/forks would collide on one entry.
+
+**OPEN — version pinning / freeze (solve next session).** Today pins/freeze are *not*
+exposed: `normalize_id` (config.rs) drops `@version` and lowercases, the snapshot stores no
+extension version, and `metadata.pinned` is never read. Two distinct editor concepts —
+**exact-version install** (`id@1.2.3`) and **freeze / no-auto-update** (`metadata.pinned`).
+Proposed (not final):
+- **Collapse both into `id@version`** = "install and hold this exact version," round-tripping
+  to `pinned: true` + that version. Bare `id` = floating newest, resolved version recorded
+  in the snapshot so it doesn't churn. Pull: `pinned` → `id@version`; unpinned → bare `id`.
+- **"Keep multiple versions" lives in the vendor store and _across_ profiles, not within
+  one profile** — the editor loads one version of an id per profile, but `vendor/vsix/` (keyed
+  id+version+targetPlatform) holds e.g. `1.31.2` and `1.31.7` side by side so different
+  profiles/editors can pin different ones.
+- **Membership-model impact (the reason this is its own step):** resolved membership can no
+  longer be a `BTreeSet<String>` of bare ids — it becomes id → optional version. Touches
+  `resolve()` precedence (profile > group > global picks the pin; `exclude_extensions` still
+  matches by id), pull (capture version+pinned), push (`--install-extension id@version` +
+  set the pinned flag), and the snapshot (record resolved version).
+- **Undecided:** sequencing — one branch for vsix-vendoring + version pinning together, vs.
+  land vsix vendoring first with a version-aware *store* but versionless *config*, and pins
+  as a focused follow-up. Decide before implementing.
 
 ---
 
