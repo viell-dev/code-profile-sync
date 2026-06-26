@@ -109,5 +109,14 @@ Requires the Rust toolchain pinned in `rust-toolchain.toml`.
 
 CI runs formatting, clippy with warnings denied, and unit tests on Ubuntu, Windows, and
 macOS. The current fixture tests cover cross-platform editor paths, fake
-`product.json` install discovery, and fake profile registries without requiring a real
-editor installation.
+`product.json` install discovery, fake profile registries, and temp-backed
+`push`/`pull`/`sync` engine flows without requiring a real editor installation.
+
+There is also a manual VSCodium smoke workflow for the real editor CLI extension-install
+fallback:
+
+```sh
+gh workflow run vscodium-smoke.yml
+```
+
+It is intentionally manual rather than scheduled or PR-gated.
