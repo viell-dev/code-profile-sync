@@ -27,9 +27,15 @@ the real editor CLI extension-install fallback on Ubuntu.
 
 Deviations from the design below, kept deliberately simple for the MVP:
 
-- **`push` is non-destructive** — it sets the config's settings keys and installs missing
-  extensions but never deletes editor-only settings or uninstalls extras. Removals flow
-  only through `sync` (snapshot-gated). A destructive `--prune` push is future work.
+- **`push`/`pull` are authoritative mirrors** — the config is the source of truth for the
+  whole profile set. By default (mirror mode) `push` makes the editor match the config
+  (deleting editor-only profiles, removing extra settings keys, uninstalling extra
+  extensions) and `pull` makes the config match the editor (removing config-only profiles).
+  `sync` remains the only non-destructive op (3-way merge). **Overlay/managed mode**
+  (`[options] managed = true` or `--profile`, now repeatable) scopes a run to the profiles
+  it defines and never deletes undefined ones; in that mode a `[profiles.<name>] delete =
+  true` tombstone deletes a specific profile. Destructive changes are summarized and
+  confirmed (`--yes`/`--dry-run`). This subsumes the previously-planned `--prune` push.
 - **Settings are null-free** — JSON `null` is stripped at the read boundary (TOML has no
   null), so settings explicitly set to `null` are not managed.
 - **Extension adds are tiered** — pool → vendored copy → editor CLI. If the extension is
@@ -78,10 +84,12 @@ Near-term polish:
 - ✅ **JSON Schema + `docs/config.md`** — hand-maintained `schema/config.schema.json` +
   standalone `docs/config.md`; generated configs carry a `#:schema` directive (raw URL on
   `main`); a unit test guards schema/struct drift.
+- ✅ **Authoritative push/pull (mirror) + profile deletion + `delete = true`** — `push`/
+  `pull` are mirrors with a confirmed destructive plan; `[options] managed` and repeatable
+  `--profile` give overlay mode; tombstones delete specific profiles. Subsumes the former
+  `--prune` item.
 - **Resources beyond settings + extensions** — keybindings, snippets, tasks, MCP
   (honoring `useDefaultFlags` per resource, §1.4).
-- **Destructive `--prune` push** — let push delete editor-only settings / uninstall
-  extras (today only `sync` propagates removals).
 - **`gc`** for pool extension folders no longer referenced by any profile *across all
   editors sharing the pool* (§1.2 collision).
 - **Comment/formatting preservation** in settings files (CST-level edits, §5).
@@ -339,6 +347,8 @@ A declarative TOML file describes the **desired state**. One self-contained file
 editor is supported (e.g. `vscodium.toml`, `code.toml`); `--editor`/`--config` selects
 which. Layering keeps common things DRY:
 
+- **`[options]`** — behavior flags. `managed` (default false) selects overlay mode:
+  manage only the profiles defined in this config and never create/delete undefined ones.
 - **`[global]`** — settings + extensions applied to *every* managed profile.
 - **`[groups.<name>]`** — reusable bundles (settings + extensions) a profile can
   include. Models "common across most" without repeating.
@@ -348,7 +358,8 @@ which. Layering keeps common things DRY:
   `[profiles.Default]` is rejected on load.
 - **`[profiles.<name>]`** — per named profile: which groups it includes, profile-specific
   settings/extensions, an optional exclude list (to drop a global/group item for this
-  profile), and desired `use_default` flags.
+  profile), and desired `use_default` flags. `delete = true` makes it a tombstone (delete
+  the profile; valid only in overlay mode; no other fields allowed).
 
 ### 2.1 Documentation & optional authoring schema
 
@@ -483,11 +494,14 @@ flow** (§3.5) — the intended default for v1. Each action is also a direct sub
 scripting / non-interactive use:
 
 - `status` — parse editor + resolve repo + snapshot; print drift, no writes.
-- `pull` — editor → repo (+ snapshot). Writes profile-level TOML and updates snapshot.
-  (Menu: "overwrite config from profiles".)
-- `push` — repo → editor (+ snapshot). Applies desired state to the editor.
-  (Menu: "overwrite profiles from config".)
-- `sync` — full 3-way (§3.1) with conflict resolution, then update snapshot.
+- `pull` — editor → repo (+ snapshot). Makes the config mirror the editor; in mirror mode
+  removes config-only profiles (overlay/`--profile` keeps them). (Menu: "Pull".)
+- `push` — repo → editor (+ snapshot). Makes the editor mirror the config; in mirror mode
+  deletes editor-only profiles and prunes extra settings/extensions (overlay/`--profile`
+  scopes to defined profiles; `delete = true` tombstones delete specific ones). (Menu:
+  "Push".)
+- `sync` — full 3-way (§3.1) with conflict resolution, then update snapshot (non-destructive
+  merge; honors `delete = true` tombstones).
 - `list-profiles` — enumerate editor profiles incl. `useDefaultFlags`.
 - `detect` — list discovered editors (§0).
 - `init` — scaffold a config by importing the current editor state (an honest first
@@ -524,8 +538,8 @@ state is assumed; missing pieces are offered, not errored.
    empty/partial config.
 3. **Main menu** (loop until Exit):
    - **Sync** — bidirectional 3-way reconcile with conflict prompts (§3.1–3.2).
-   - **Overwrite profiles from config** — push (config → editor).
-   - **Overwrite config from profiles** — pull (editor → config).
+   - **Push** — make the editor match the config (config → editor; REPLACES editor profiles).
+   - **Pull** — make the config match the editor (editor → config; REPLACES config profiles).
    - *(reserved)* — placeholder for a later action (e.g. manage groups / per-profile
      extension picking). Listed but inert in v1.
    - **Exit.**
@@ -629,10 +643,12 @@ interactive conflicts (e.g. `dialoguer`/`inquire`). Avoid `rusqlite` — `state.
    (§2.3), `init` (import current state → first snapshot, repo starts converged),
    behavior-preserving consolidation, the standalone `docs/config.md` reference, and a
    hand-maintained `schema/config.schema.json` wired via a `#:schema` directive.
-3. ✅ **Push** — apply settings (JSONC merge) + tiered extension adds with safety,
-   atomic writes, backups, `--dry-run`. Honors `useDefaultFlags`. *(Non-destructive;
-   `--prune` pending.)*
-4. ✅ **Pull** — editor → repo at profile level + snapshot update + VSIX vendoring.
+3. ✅ **Push** — authoritative mirror: applies settings (JSONC merge), tiered extension
+   adds, prunes extras, and deletes editor-only profiles (overlay/`--profile`/`delete =
+   true` scope it); safety gate, atomic writes, backups, `--dry-run`, confirmed destructive
+   plan. Honors `useDefaultFlags`.
+4. ✅ **Pull** — authoritative mirror: editor → repo at profile level (removes config-only
+   profiles in mirror mode) + snapshot update + VSIX vendoring.
 5. ✅ **Sync + interactive flow** — 3-way engine + interactive/`--prefer` conflict
    resolution, first-run wizard + main menu (§3.5), close-the-editor gate, and switching
    editors from the menu. The default entry point.

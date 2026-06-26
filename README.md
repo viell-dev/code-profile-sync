@@ -28,10 +28,17 @@ sandboxes, remote systems, or shared profile baselines.
   and extensions shared across your profiles into `[global]` for you. See
   [`docs/config.md`](./docs/config.md) for the full format; generated configs carry a
   `#:schema` directive so TOML-aware editors offer completion and validation.
+- **Config is the source of truth:** `push` makes the editor mirror the config and `pull`
+  makes the config mirror the editor — both **authoritative/destructive** by default (a
+  fresh editor + your `<editor>.toml` + `push` recreates every profile). `sync` is the only
+  non-destructive op (3-way merge). **Overlay mode** — `[options] managed = true` or
+  `--profile` (repeatable) — scopes a run to the profiles it defines so undefined ones are
+  left alone; `delete = true` deletes a specific profile. Destructive changes are listed and
+  confirmed (`--dry-run`/`--yes`).
 - **Interactive by default:** run with no arguments → pick an editor (or enter a custom
   path), optionally create a config from the editor's current profiles, then a menu:
-  Sync / overwrite profiles from config / overwrite config from profiles / exit. Each is
-  also a direct subcommand (`status`/`pull`/`push`/`sync`) for scripting.
+  Sync / Push / Pull / consolidate / choose editor / exit. Each is also a direct subcommand
+  (`status`/`pull`/`push`/`sync`) for scripting.
 - **Sync:** 3-way with per-item conflict resolution (keep editor / keep repo). You're
   prompted to close the editor before any write.
 - **App home:** default state lives under the platform app config directory, with
@@ -110,9 +117,13 @@ specific editor config. With `--config` alone, derived state stays next to that 
 
 ### Behavior notes
 
-- **`push`** is non-destructive: it sets the config's settings keys and installs missing
-  extensions, but does not delete editor-only settings or uninstall extras. **`sync`** is
-  the bidirectional path that also propagates removals (gated by the snapshot).
+- **`push`/`pull`** are authoritative mirrors (config is the source of truth). In the
+  default mirror mode `push` deletes editor-only profiles and prunes extra
+  settings/extensions; `pull` removes config-only profiles. **Overlay mode**
+  (`[options] managed = true` or `--profile`) scopes to defined profiles and never deletes
+  undefined ones, where a `delete = true` tombstone removes a specific profile. **`sync`**
+  is the non-destructive 3-way merge. Destructive changes are confirmed
+  (`--dry-run`/`--yes`); the editor must be closed for `push`/`sync`.
 - Code - OSS and VSCodium share one extension pool (`~/.vscode-oss/extensions`), and the
   **Default** profile's extension list is that pool's own `extensions.json`. Be aware that
   syncing the Default profile's extensions can affect both editors.

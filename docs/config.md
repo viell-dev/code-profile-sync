@@ -31,6 +31,43 @@ ergonomics.
 An effective per-profile state is computed by layering these (see
 [Merge precedence](#merge-precedence)).
 
+## Push, pull, and sync — mirror vs overlay
+
+The config is the source of truth. The three operations are:
+
+- **push** — make the editor match the config. **Destructive:** in the default *mirror*
+  mode, editor profiles not in the config are deleted, and within each managed profile
+  extra settings keys are removed and extra extensions uninstalled. Take a `<editor>.toml`
+  to a fresh machine and `push` to recreate all your profiles.
+- **pull** — make the config match the editor. **Destructive:** in mirror mode, named
+  profiles in the config that no longer exist in the editor are removed.
+- **sync** — the only non-destructive operation: a 3-way merge that reconciles both sides
+  with per-item conflict resolution.
+
+**Overlay (managed) mode** turns off the "delete undefined" behavior so the config manages
+only the profiles it defines, leaving everything else untouched. Enable it with
+`[options] managed = true` (see below) or per-run with `--profile <name>` (repeatable). Use
+it to push a few admin/shared profiles to machines without disturbing users' personal
+profiles. In overlay mode, deleting a profile requires an explicit
+[`delete = true`](#tombstones-delete--true) tombstone.
+
+Destructive changes are listed and confirmed before any write (`--dry-run` to preview,
+`--yes` to skip the prompt; the editor must be closed for `push`/`sync`).
+
+The target is just a path: a config or app-home on a network/SFTP-style mount is treated
+as an ordinary directory.
+
+## `[options]`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `managed` | bool | Overlay/managed mode. `true` = manage only the profiles defined in this config (plus `delete = true` tombstones) and never create or delete undefined profiles. Default `false` = full mirror (the config owns the entire profile set). |
+
+```toml
+[options]
+managed = true
+```
+
 ## `[editor]`
 
 How the config refers to / overrides the target editor. All fields optional.
@@ -108,6 +145,7 @@ A named profile. Use a quoted key for names with spaces (e.g. `[profiles."TaqsWe
 | `extensions` | array | Profile-specific extensions. |
 | `exclude_extensions` | array | Extension IDs to drop even if a group/global adds them. |
 | `use_default` | table | Resources inherited from Default (see [`use_default`](#use_default)). |
+| `delete` | bool | Tombstone — delete this profile (see [Tombstones](#tombstones-delete--true)). |
 
 ```toml
 [profiles.Rust]
@@ -121,6 +159,32 @@ groups = ["web"]
 exclude_extensions = ["usernamehw.errorlens"]
 use_default = { keybindings = true }
 ```
+
+## Tombstones (`delete = true`)
+
+`delete = true` marks a profile for **deletion** from the editor on `push`/`sync`:
+
+```toml
+[profiles.Legacy]
+delete = true
+```
+
+Rules:
+
+- **Overlay mode only.** A tombstone is valid only when the run is scoped — `[options]
+  managed = true` or `--profile`. In full *mirror* mode a tombstone is rejected, because
+  there you delete a profile simply by removing its `[profiles.<name>]` block (absence
+  already means deletion). This keeps the two ways of deleting from overlapping.
+- **No other fields.** A tombstone must not carry `settings`, `extensions`, `groups`,
+  `icon`, `use_default`, etc. — that combination is rejected on load.
+- **Kept after push.** The tombstone stays in the config so it keeps re-asserting absence
+  across machines that come and go (idempotent).
+- **Cleared by pull.** If the editor actually has the profile, `pull` captures it and
+  clears the tombstone (the editor is the source of truth for `pull`).
+- Deletion removes the profile's `storage.json` entry and its data directory; it **never**
+  deletes shared extension-pool folders (membership only). The Default profile cannot be
+  deleted. Workspace pins (`profileAssociations`) referencing it are warned about, not
+  rewritten.
 
 ## Settings
 
