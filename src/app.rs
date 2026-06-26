@@ -137,6 +137,7 @@ fn make_ctx<'a>(
         editor,
         dry_run: g.dry_run,
         non_interactive: g.non_interactive,
+        assume_yes: g.yes,
         prefer: g.prefer,
         profile_filter: g.profile.clone(),
         backup_dir,
@@ -612,8 +613,8 @@ fn create_config(session: Session, g: &GlobalArgs) -> Result<Session> {
 fn menu_loop(mut session: Session, g: &GlobalArgs) -> Result<()> {
     let actions = [
         "Sync (reconcile both ways)",
-        "Overwrite profiles from config (push)",
-        "Overwrite config from profiles (pull)",
+        "Push: make the editor match the config (REPLACES editor profiles)",
+        "Pull: make the config match the editor (REPLACES config profiles)",
         "Consolidate shared settings/extensions into [global]",
         "Choose a different editor",
         "Exit",

@@ -70,6 +70,34 @@ pub fn backup_file(path: &Path, backup_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Recursively copy a directory into `backup_dir/<dir name>` before a destructive
+/// operation. No-op if the source is not a directory.
+pub fn backup_dir_tree(src: &Path, backup_dir: &Path) -> Result<()> {
+    if !src.is_dir() {
+        return Ok(());
+    }
+    let name = src
+        .file_name()
+        .map_or_else(|| "dir".into(), ToOwned::to_owned);
+    copy_tree(src, &backup_dir.join(name))
+}
+
+fn copy_tree(src: &Path, dest: &Path) -> Result<()> {
+    fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
+    for entry in fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let target = dest.join(entry.file_name());
+        if path.is_dir() {
+            copy_tree(&path, &target)?;
+        } else {
+            fs::copy(&path, &target)
+                .with_context(|| format!("copying {} to {}", path.display(), target.display()))?;
+        }
+    }
+    Ok(())
+}
+
 /// A timestamp string (seconds since the Unix epoch) for naming a backup run.
 pub fn timestamp() -> String {
     SystemTime::now()

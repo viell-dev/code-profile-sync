@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::Editor;
-use crate::safety;
+use crate::{safety, ui};
 
 /// Name of the implicit Default profile (its data lives at the `User/` root).
 pub const DEFAULT_PROFILE: &str = "Default";
@@ -163,6 +163,61 @@ pub fn create(
     Ok(profile)
 }
 
+/// Delete a named profile: remove its `userDataProfiles` entry and its data
+/// directory. Returns whether the profile existed. Refuses the Default profile,
+/// never touches the shared extensions pool (membership only), and only warns
+/// about `profileAssociations` that reference it (those are preserved, not
+/// managed). A dry run reports without writing.
+pub fn delete(
+    editor: &Editor,
+    name: &str,
+    dry_run: bool,
+    backup_dir: &std::path::Path,
+) -> Result<bool> {
+    if name == DEFAULT_PROFILE {
+        anyhow::bail!("refusing to delete the Default profile");
+    }
+    let mut stored = read_stored(editor)?;
+    let Some(entry) = stored.iter().find(|p| p.name == name) else {
+        return Ok(false);
+    };
+    let location = entry.location.clone();
+    warn_dangling_associations(editor, &location);
+    if dry_run {
+        return Ok(true);
+    }
+    stored.retain(|p| p.name != name);
+    write_stored(editor, &stored, backup_dir)?;
+    let dir = editor.profile_dir(&location);
+    if dir.is_dir() {
+        safety::backup_dir_tree(&dir, backup_dir)?;
+        fs::remove_dir_all(&dir)
+            .with_context(|| format!("removing profile dir {}", dir.display()))?;
+    }
+    Ok(true)
+}
+
+/// Warn (best effort) when a profile location is referenced by a workspace/window
+/// pin, since deleting it leaves the pin dangling (the editor falls back to
+/// Default). We do not edit `profileAssociations` (preserved, not managed).
+fn warn_dangling_associations(editor: &Editor, location: &str) {
+    let path = editor.storage_json();
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
+    let Some(assoc) = value.get("profileAssociations") else {
+        return;
+    };
+    if serde_json::to_string(assoc).is_ok_and(|s| s.contains(location)) {
+        ui::warn(format!(
+            "profileAssociations reference '{location}'; those workspace pins will dangle (editor falls back to Default)"
+        ));
+    }
+}
+
 /// Replace the `userDataProfiles` array in `storage.json`, preserving all other
 /// keys. Creates the file if missing.
 fn write_stored(
@@ -293,6 +348,54 @@ mod tests {
         assert_eq!(stored.len(), 1);
         assert_eq!(stored.first().map(|p| p.name.as_str()), Some("Web"));
         assert_eq!(stored.first().map(|p| p.location.as_str()), Some("abc123"));
+        Ok(())
+    }
+
+    #[test]
+    fn delete_removes_entry_and_dir_and_refuses_default() -> Result<()> {
+        let dir = tempdir()?;
+        let user_dir = dir.path().join("User");
+        let storage_dir = user_dir.join("globalStorage");
+        fs::create_dir_all(&storage_dir)?;
+        fs::create_dir_all(user_dir.join("profiles").join("-rust"))?;
+        fs::write(
+            storage_dir.join("storage.json"),
+            r#"{"userDataProfiles":[{"location":"-rust","name":"Rust"}]}"#,
+        )?;
+        let editor = editor(&user_dir, &dir.path().join("extensions"));
+        let backup = dir.path().join("backups");
+
+        assert!(delete(&editor, "Rust", false, &backup)?, "existing profile");
+        assert!(read_stored(&editor)?.is_empty(), "registry entry gone");
+        assert!(
+            !user_dir.join("profiles").join("-rust").is_dir(),
+            "profile dir removed"
+        );
+
+        assert!(!delete(&editor, "Rust", false, &backup)?, "already absent");
+        assert!(
+            delete(&editor, "Default", false, &backup).is_err(),
+            "refuses Default"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn delete_dry_run_keeps_everything() -> Result<()> {
+        let dir = tempdir()?;
+        let user_dir = dir.path().join("User");
+        let storage_dir = user_dir.join("globalStorage");
+        fs::create_dir_all(&storage_dir)?;
+        fs::create_dir_all(user_dir.join("profiles").join("-rust"))?;
+        fs::write(
+            storage_dir.join("storage.json"),
+            r#"{"userDataProfiles":[{"location":"-rust","name":"Rust"}]}"#,
+        )?;
+        let editor = editor(&user_dir, &dir.path().join("extensions"));
+
+        assert!(delete(&editor, "Rust", true, &dir.path().join("backups"))?);
+        assert_eq!(read_stored(&editor)?.len(), 1, "dry run wrote nothing");
+        assert!(user_dir.join("profiles").join("-rust").is_dir());
         Ok(())
     }
 
