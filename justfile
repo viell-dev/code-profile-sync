@@ -27,8 +27,8 @@ check: fmt-check clippy test
 detect:
     cargo run -- detect
 
-run *args:
-    cargo run -- {{args}}
+run *args: _run_dir
+    cargo run -- --app-dir run {{args}}
 
 dev *args: _run_dir
     cargo run -- --config "{{default_config}}" --editor "{{default_editor}}" {{args}}
