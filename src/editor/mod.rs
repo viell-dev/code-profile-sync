@@ -32,7 +32,12 @@ impl Editor {
     pub fn new(product: Product, launcher: PathBuf) -> Result<Self> {
         let user_dir = paths::user_dir(&product)?;
         let extensions_dir = paths::extensions_dir(&product)?;
-        Ok(Self { product, launcher, user_dir, extensions_dir })
+        Ok(Self {
+            product,
+            launcher,
+            user_dir,
+            extensions_dir,
+        })
     }
 
     /// Stable identifier used in config and on the CLI (`nameShort`).
@@ -68,8 +73,9 @@ pub fn find(selector: &str) -> Option<Editor> {
     // An explicit path takes precedence over a name lookup.
     let as_path = Path::new(selector);
     if as_path.exists()
-        && let Ok(editor) = from_path(as_path) {
-            return Some(editor);
-        }
+        && let Ok(editor) = from_path(as_path)
+    {
+        return Some(editor);
+    }
     discover().into_iter().find(|e| e.matches(selector))
 }

@@ -36,7 +36,8 @@ impl Snapshot {
         if !path.is_file() {
             return Ok(Self::default());
         }
-        let raw = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let raw =
+            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let snapshot =
             serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
         Ok(snapshot)
@@ -56,7 +57,10 @@ impl Snapshot {
 
 /// Default snapshot path for a config file and editor id.
 pub fn path_for(config_path: &Path, editor_id: &str) -> PathBuf {
-    let dir = config_path.parent().unwrap_or_else(|| Path::new(".")).join(".code-profile-sync");
+    let dir = config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".code-profile-sync");
     let safe = editor_id.replace([' ', '/', '\\'], "-");
     dir.join(format!("{safe}.snapshot.json"))
 }

@@ -81,7 +81,8 @@ pub struct Resolved {
 impl Config {
     /// Load a config from a TOML file.
     pub fn load(path: &Path) -> Result<Self> {
-        let raw = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let raw =
+            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let config: Self =
             toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
         Ok(config)
@@ -90,7 +91,9 @@ impl Config {
     /// Serialize the config to a TOML string with a generated-file header.
     pub fn to_toml(&self) -> Result<String> {
         let body = toml::to_string_pretty(&self.sanitized()).context("serializing config")?;
-        Ok(format!("# code-profile-sync config. See README.md for the format.\n\n{body}"))
+        Ok(format!(
+            "# code-profile-sync config. See README.md for the format.\n\n{body}"
+        ))
     }
 
     /// A clone with all settings null values stripped (TOML has no null type).
@@ -117,8 +120,12 @@ impl Config {
 
     fn resolve_profile(&self, profile: &ProfileConfig) -> Resolved {
         let mut settings = self.global.settings.clone();
-        let mut extensions: BTreeSet<String> =
-            self.global.extensions.iter().map(|id| normalize_id(id)).collect();
+        let mut extensions: BTreeSet<String> = self
+            .global
+            .extensions
+            .iter()
+            .map(|id| normalize_id(id))
+            .collect();
 
         for group_name in &profile.groups {
             if let Some(group) = self.groups.get(group_name) {
@@ -160,8 +167,10 @@ pub fn strip_nulls(value: &Value) -> Option<Value> {
         Value::Null => None,
         Value::Array(items) => Some(Value::Array(items.iter().filter_map(strip_nulls).collect())),
         Value::Object(map) => {
-            let cleaned =
-                map.iter().filter_map(|(k, v)| strip_nulls(v).map(|s| (k.clone(), s))).collect();
+            let cleaned = map
+                .iter()
+                .filter_map(|(k, v)| strip_nulls(v).map(|s| (k.clone(), s)))
+                .collect();
             Some(Value::Object(cleaned))
         }
         other => Some(other.clone()),
@@ -170,7 +179,10 @@ pub fn strip_nulls(value: &Value) -> Option<Value> {
 
 /// Strip nulls across a settings map, dropping keys whose value was `null`.
 pub fn sanitize_settings(settings: &BTreeMap<String, Value>) -> BTreeMap<String, Value> {
-    settings.iter().filter_map(|(k, v)| strip_nulls(v).map(|s| (k.clone(), s))).collect()
+    settings
+        .iter()
+        .filter_map(|(k, v)| strip_nulls(v).map(|s| (k.clone(), s)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -205,11 +217,22 @@ mod tests {
 
         let resolved = config.resolve();
         let p = resolved.get("P").unwrap();
-        assert_eq!(p.settings.get("a"), Some(&json!(10)), "profile overrides global");
-        assert_eq!(p.settings.get("b"), Some(&json!(2)), "group setting present");
+        assert_eq!(
+            p.settings.get("a"),
+            Some(&json!(10)),
+            "profile overrides global"
+        );
+        assert_eq!(
+            p.settings.get("b"),
+            Some(&json!(2)),
+            "group setting present"
+        );
         assert!(p.extensions.contains("pub.group"));
         assert!(p.extensions.contains("pub.profile"));
-        assert!(!p.extensions.contains("pub.global"), "exclude removed a global extension");
+        assert!(
+            !p.extensions.contains("pub.global"),
+            "exclude removed a global extension"
+        );
     }
 
     #[test]
@@ -243,6 +266,9 @@ mod tests {
         let resolved = parsed.resolve();
         let p = resolved.get("P").unwrap();
         assert_eq!(p.settings.get("editor.tabSize"), Some(&json!(2)));
-        assert_eq!(p.settings.get("[rust]"), Some(&json!({"editor.formatOnSave": true})));
+        assert_eq!(
+            p.settings.get("[rust]"),
+            Some(&json!({"editor.formatOnSave": true}))
+        );
     }
 }

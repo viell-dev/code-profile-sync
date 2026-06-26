@@ -13,21 +13,44 @@ use super::Editor;
 use super::product::Product;
 
 /// Launcher command names we look for on `PATH`, in preference order.
-const LAUNCHERS: &[&str] = &["code-oss", "codium", "vscodium", "code", "code-insiders", "cursor"];
+const LAUNCHERS: &[&str] = &[
+    "code-oss",
+    "codium",
+    "vscodium",
+    "code",
+    "code-insiders",
+    "cursor",
+];
 
 /// System prefixes under which distros install editor app trees.
-const SYSTEM_PREFIXES: &[&str] =
-    &["/usr/lib", "/usr/share", "/opt", "/usr/local/lib", "/usr/local/share"];
+const SYSTEM_PREFIXES: &[&str] = &[
+    "/usr/lib",
+    "/usr/share",
+    "/opt",
+    "/usr/local/lib",
+    "/usr/local/share",
+];
 
 /// Find all editors discoverable on this machine, de-duplicated by product.
 pub fn discover() -> Vec<Editor> {
     let mut editors: Vec<Editor> = Vec::new();
     for name in LAUNCHERS {
-        let Some(launcher) = which(name) else { continue };
-        let Some(product_path) = find_product_json(&launcher) else { continue };
-        let Ok(product) = Product::from_file(&product_path) else { continue };
-        let Ok(editor) = Editor::new(product, launcher) else { continue };
-        if !editors.iter().any(|e| e.product.name_short == editor.product.name_short) {
+        let Some(launcher) = which(name) else {
+            continue;
+        };
+        let Some(product_path) = find_product_json(&launcher) else {
+            continue;
+        };
+        let Ok(product) = Product::from_file(&product_path) else {
+            continue;
+        };
+        let Ok(editor) = Editor::new(product, launcher) else {
+            continue;
+        };
+        if !editors
+            .iter()
+            .any(|e| e.product.name_short == editor.product.name_short)
+        {
             editors.push(editor);
         }
     }
@@ -40,12 +63,12 @@ pub fn from_path(input: &Path) -> anyhow::Result<Editor> {
     let product_path = if input.is_file() && input.file_name() == Some("product.json".as_ref()) {
         input.to_path_buf()
     } else if input.is_dir() {
-        product_in_dir(input).ok_or_else(|| {
-            anyhow::anyhow!("no product.json found under {}", input.display())
-        })?
+        product_in_dir(input)
+            .ok_or_else(|| anyhow::anyhow!("no product.json found under {}", input.display()))?
     } else {
-        find_product_json(input)
-            .ok_or_else(|| anyhow::anyhow!("could not locate product.json for {}", input.display()))?
+        find_product_json(input).ok_or_else(|| {
+            anyhow::anyhow!("could not locate product.json for {}", input.display())
+        })?
     };
     let product = Product::from_file(&product_path)?;
     // For a launcher file, invoke it directly; otherwise fall back to the
@@ -82,7 +105,9 @@ fn is_executable_file(path: &Path) -> bool {
 
 /// Probe candidate `product.json` locations for a launcher path.
 fn find_product_json(launcher: &Path) -> Option<PathBuf> {
-    let resolved = launcher.canonicalize().unwrap_or_else(|_| launcher.to_path_buf());
+    let resolved = launcher
+        .canonicalize()
+        .unwrap_or_else(|_| launcher.to_path_buf());
 
     // 1. Walk up from the resolved launcher, checking each ancestor directory.
     for ancestor in resolved.ancestors().skip(1) {

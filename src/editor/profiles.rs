@@ -23,7 +23,11 @@ pub struct StoredProfile {
     pub location: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
-    #[serde(rename = "useDefaultFlags", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "useDefaultFlags",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub use_default_flags: Option<BTreeMap<String, bool>>,
 }
 
@@ -80,7 +84,11 @@ impl Profile {
     /// The `--profile` argument for the editor CLI, or `None` for the Default
     /// profile (which is targeted by omitting the flag).
     pub fn cli_profile(&self) -> Option<&str> {
-        if self.is_default() { None } else { Some(self.name.as_str()) }
+        if self.is_default() {
+            None
+        } else {
+            Some(self.name.as_str())
+        }
     }
 }
 
@@ -90,20 +98,19 @@ pub fn read_stored(editor: &Editor) -> Result<Vec<StoredProfile>> {
     if !path.is_file() {
         return Ok(Vec::new());
     }
-    let raw = fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let value: serde_json::Value = serde_json::from_str(&raw)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let raw = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
     let Some(field) = value.get("userDataProfiles") else {
         return Ok(Vec::new());
     };
     // The value is normally a JSON array, but some builds store it as a
     // JSON-encoded string; handle both.
     let profiles = match field {
-        serde_json::Value::String(encoded) => serde_json::from_str(encoded)
-            .context("parsing stringified userDataProfiles")?,
-        other => serde_json::from_value(other.clone())
-            .context("parsing userDataProfiles array")?,
+        serde_json::Value::String(encoded) => {
+            serde_json::from_str(encoded).context("parsing stringified userDataProfiles")?
+        }
+        other => serde_json::from_value(other.clone()).context("parsing userDataProfiles array")?,
     };
     Ok(profiles)
 }
@@ -158,7 +165,11 @@ pub fn create(
 
 /// Replace the `userDataProfiles` array in `storage.json`, preserving all other
 /// keys. Creates the file if missing.
-fn write_stored(editor: &Editor, stored: &[StoredProfile], backup_dir: &std::path::Path) -> Result<()> {
+fn write_stored(
+    editor: &Editor,
+    stored: &[StoredProfile],
+    backup_dir: &std::path::Path,
+) -> Result<()> {
     let path = editor.storage_json();
     let mut root: serde_json::Value = if path.is_file() {
         let raw =
@@ -180,7 +191,9 @@ fn write_stored(editor: &Editor, stored: &[StoredProfile], backup_dir: &std::pat
 
 /// Generate a profile location id (8 hex chars) not already in use.
 fn generate_location(name: &str, existing: &[StoredProfile]) -> String {
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
     for attempt in 0..u32::MAX {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         name.hash(&mut hasher);

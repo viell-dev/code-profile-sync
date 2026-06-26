@@ -37,16 +37,24 @@ pub fn read_membership_file(path: &Path) -> Result<BTreeSet<String>> {
     if !path.is_file() {
         return Ok(BTreeSet::new());
     }
-    let raw = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let entries: Vec<RawEntry> =
         serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
-    Ok(entries.iter().map(|e| normalize_id(&e.identifier.id)).collect())
+    Ok(entries
+        .iter()
+        .map(|e| normalize_id(&e.identifier.id))
+        .collect())
 }
 
 /// Install an extension into a profile via the editor CLI.
 pub fn install(editor: &Editor, profile_name: Option<&str>, id: &str) -> Result<()> {
-    run_cli(editor, profile_name, &["--install-extension", id, "--force"])
-        .with_context(|| format!("installing extension {id}"))
+    run_cli(
+        editor,
+        profile_name,
+        &["--install-extension", id, "--force"],
+    )
+    .with_context(|| format!("installing extension {id}"))
 }
 
 /// Uninstall an extension from a profile via the editor CLI.

@@ -26,7 +26,9 @@ pub struct Ctx<'a> {
 
 impl Ctx<'_> {
     fn wants(&self, name: &str) -> bool {
-        self.profile_filter.as_deref().is_none_or(|f| f.eq_ignore_ascii_case(name))
+        self.profile_filter
+            .as_deref()
+            .is_none_or(|f| f.eq_ignore_ascii_case(name))
     }
 }
 
@@ -40,8 +42,9 @@ fn read_actual(editor: &Editor, profile: &Profile) -> Result<Actual> {
     let settings = if profile.inherits("settings") {
         BTreeMap::new()
     } else {
-        let raw: BTreeMap<String, Value> =
-            jsonc::read_object(&profile.settings_path(editor))?.into_iter().collect();
+        let raw: BTreeMap<String, Value> = jsonc::read_object(&profile.settings_path(editor))?
+            .into_iter()
+            .collect();
         crate::config::sanitize_settings(&raw)
     };
     let extensions = if profile.inherits("extensions") {
@@ -49,12 +52,18 @@ fn read_actual(editor: &Editor, profile: &Profile) -> Result<Actual> {
     } else {
         extension::read_membership(editor, profile)?
     };
-    Ok(Actual { settings, extensions })
+    Ok(Actual {
+        settings,
+        extensions,
+    })
 }
 
 /// Map of the editor's current profiles by name.
 fn editor_profiles(editor: &Editor) -> Result<BTreeMap<String, Profile>> {
-    Ok(profiles::read_all(editor)?.into_iter().map(|p| (p.name.clone(), p)).collect())
+    Ok(profiles::read_all(editor)?
+        .into_iter()
+        .map(|p| (p.name.clone(), p))
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -127,7 +136,14 @@ pub fn pull(ctx: &Ctx<'_>, config: &mut Config, snapshot: &mut Snapshot) -> Resu
             continue;
         }
         let actual = read_actual(ctx.editor, profile)?;
-        capture_profile(config, snapshot, name, profile, &actual.settings, &actual.extensions);
+        capture_profile(
+            config,
+            snapshot,
+            name,
+            profile,
+            &actual.settings,
+            &actual.extensions,
+        );
         ui::bullet(format!(
             "captured {name} ({} settings, {} extensions)",
             actual.settings.len(),
@@ -164,15 +180,25 @@ fn capture_profile(
 
     snapshot.profiles.insert(
         name.to_owned(),
-        ProfileSnapshot { settings: settings.clone(), extensions: extensions.clone() },
+        ProfileSnapshot {
+            settings: settings.clone(),
+            extensions: extensions.clone(),
+        },
     );
 }
 
 /// The desired state of a profile from base layers only (global + its groups),
 /// excluding profile-level settings/extensions.
 fn baseline(config: &Config, name: &str) -> Resolved {
-    let groups = config.profiles.get(name).map(|p| p.groups.clone()).unwrap_or_default();
-    let probe = ProfileConfig { groups, ..ProfileConfig::default() };
+    let groups = config
+        .profiles
+        .get(name)
+        .map(|p| p.groups.clone())
+        .unwrap_or_default();
+    let probe = ProfileConfig {
+        groups,
+        ..ProfileConfig::default()
+    };
     let mut probe_config = config.clone();
     probe_config.profiles.clear();
     probe_config.profiles.insert(name.to_owned(), probe);
@@ -194,7 +220,9 @@ pub fn push(ctx: &Ctx<'_>, config: &Config, snapshot: &mut Snapshot) -> Result<(
         if !ctx.wants(name) {
             continue;
         }
-        let profile = if let Some(p) = editors.get(name) { p.clone() } else {
+        let profile = if let Some(p) = editors.get(name) {
+            p.clone()
+        } else {
             let created = create_profile(ctx, name, want)?;
             editors.insert(name.clone(), created.clone());
             created
@@ -210,14 +238,18 @@ pub fn push(ctx: &Ctx<'_>, config: &Config, snapshot: &mut Snapshot) -> Result<(
 
         // Extensions: install any missing desired ones.
         if effective_inherits(want, &profile, "extensions") {
-            ui::bullet(format!("{name}: inherits extensions from Default (skipped)"));
+            ui::bullet(format!(
+                "{name}: inherits extensions from Default (skipped)"
+            ));
         } else {
             let current = extension::read_membership(ctx.editor, &profile)?;
             for id in want.extensions.difference(&current) {
                 install_ext(ctx, &profile, id)?;
             }
             for id in current.difference(&want.extensions) {
-                ui::detail(format!("{name}: editor-only extension left installed: {id}"));
+                ui::detail(format!(
+                    "{name}: editor-only extension left installed: {id}"
+                ));
             }
         }
 
@@ -234,7 +266,10 @@ pub fn push(ctx: &Ctx<'_>, config: &Config, snapshot: &mut Snapshot) -> Result<(
 }
 
 fn effective_inherits(want: &Resolved, profile: &Profile, resource: &str) -> bool {
-    want.use_default.get(resource).copied().unwrap_or_else(|| profile.inherits(resource))
+    want.use_default
+        .get(resource)
+        .copied()
+        .unwrap_or_else(|| profile.inherits(resource))
 }
 
 // ---------------------------------------------------------------------------
@@ -267,8 +302,12 @@ pub fn sync(ctx: &Ctx<'_>, config: &mut Config, snapshot: &mut Snapshot) -> Resu
         let exts = reconcile_extensions(ctx, &name, &base, &want.extensions, &actual.extensions)?;
 
         // Apply to editor.
-        let removes: Vec<String> =
-            actual.settings.keys().filter(|k| !settings.contains_key(*k)).cloned().collect();
+        let removes: Vec<String> = actual
+            .settings
+            .keys()
+            .filter(|k| !settings.contains_key(*k))
+            .cloned()
+            .collect();
         if !effective_inherits(&want, &profile, "settings") {
             apply_settings(ctx, &profile, &settings, &removes)?;
         }
@@ -443,7 +482,10 @@ fn apply_settings(
         return Ok(());
     }
     if ctx.dry_run {
-        ui::bullet(format!("would update {changed} setting(s) in {}", profile.name));
+        ui::bullet(format!(
+            "would update {changed} setting(s) in {}",
+            profile.name
+        ));
         return Ok(());
     }
     safety::backup_file(&path, &ctx.backup_dir)?;
@@ -519,10 +561,22 @@ mod tests {
         let b = json!(2);
         let c = json!(3);
 
-        assert!(matches!(classify(None, Some(&a), Some(&a)), Decision::Agree));
-        assert!(matches!(classify(Some(&a), Some(&b), Some(&a)), Decision::TakeRepo));
-        assert!(matches!(classify(Some(&a), Some(&a), Some(&b)), Decision::TakeEditor));
-        assert!(matches!(classify(Some(&a), Some(&b), Some(&c)), Decision::Conflict));
+        assert!(matches!(
+            classify(None, Some(&a), Some(&a)),
+            Decision::Agree
+        ));
+        assert!(matches!(
+            classify(Some(&a), Some(&b), Some(&a)),
+            Decision::TakeRepo
+        ));
+        assert!(matches!(
+            classify(Some(&a), Some(&a), Some(&b)),
+            Decision::TakeEditor
+        ));
+        assert!(matches!(
+            classify(Some(&a), Some(&b), Some(&c)),
+            Decision::Conflict
+        ));
     }
 
     #[test]
@@ -531,8 +585,14 @@ mod tests {
         let b = json!(2);
         // Only one side has the item and there is no base: take that side.
         assert!(matches!(classify(None, Some(&a), None), Decision::TakeRepo));
-        assert!(matches!(classify(None, None, Some(&a)), Decision::TakeEditor));
+        assert!(matches!(
+            classify(None, None, Some(&a)),
+            Decision::TakeEditor
+        ));
         // Both present but differing, no base: a genuine conflict.
-        assert!(matches!(classify(None, Some(&a), Some(&b)), Decision::Conflict));
+        assert!(matches!(
+            classify(None, Some(&a), Some(&b)),
+            Decision::Conflict
+        ));
     }
 }

@@ -31,7 +31,10 @@ fn process_matches(name: &str, needle: &str) -> bool {
         return true;
     }
     match name.strip_prefix(needle) {
-        Some(rest) => rest.chars().next().is_some_and(|c| !c.is_ascii_alphanumeric()),
+        Some(rest) => rest
+            .chars()
+            .next()
+            .is_some_and(|c| !c.is_ascii_alphanumeric()),
         None => false,
     }
 }
@@ -58,7 +61,9 @@ pub fn backup_file(path: &Path, backup_dir: &Path) -> Result<()> {
     }
     fs::create_dir_all(backup_dir)
         .with_context(|| format!("creating backup directory {}", backup_dir.display()))?;
-    let name = path.file_name().map_or_else(|| "file".into(), ToOwned::to_owned);
+    let name = path
+        .file_name()
+        .map_or_else(|| "file".into(), ToOwned::to_owned);
     let dest = backup_dir.join(format!("{}-{}", short_hash(path), name.to_string_lossy()));
     fs::copy(path, &dest)
         .with_context(|| format!("backing up {} to {}", path.display(), dest.display()))?;
@@ -68,7 +73,8 @@ pub fn backup_file(path: &Path, backup_dir: &Path) -> Result<()> {
 /// A timestamp string (seconds since the Unix epoch) for naming a backup run.
 pub fn timestamp() -> String {
     SystemTime::now()
-        .duration_since(UNIX_EPOCH).map_or_else(|_| "0".to_owned(), |d| d.as_secs().to_string())
+        .duration_since(UNIX_EPOCH)
+        .map_or_else(|_| "0".to_owned(), |d| d.as_secs().to_string())
 }
 
 fn short_hash(path: &Path) -> String {
@@ -81,7 +87,9 @@ fn temp_sibling(path: &Path) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.subsec_nanos());
-    let base = path.file_name().map_or_else(|| "tmp".into(), ToOwned::to_owned);
+    let base = path
+        .file_name()
+        .map_or_else(|| "tmp".into(), ToOwned::to_owned);
     let suffix = format!(".{}.{nanos}.tmp", process::id());
     let mut name = base.to_string_lossy().into_owned();
     name.push_str(&suffix);

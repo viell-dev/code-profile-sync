@@ -7,8 +7,8 @@ use anyhow::{Context, Result};
 
 use crate::cli::GlobalArgs;
 use crate::config::Config;
-use crate::editor::{self, Editor};
 use crate::editor::profiles;
+use crate::editor::{self, Editor};
 use crate::snapshot::{self, Snapshot};
 use crate::sync::{self, Ctx};
 use crate::{safety, ui};
@@ -26,8 +26,11 @@ struct Session {
 impl Session {
     /// Load (or default) the config and snapshot for an editor at a config path.
     fn open(editor: Editor, config_path: PathBuf) -> Result<Self> {
-        let config =
-            if config_path.is_file() { Config::load(&config_path)? } else { Config::default() };
+        let config = if config_path.is_file() {
+            Config::load(&config_path)?
+        } else {
+            Config::default()
+        };
         let snapshot_path = snapshot::path_for(&config_path, editor.id());
         let snapshot = Snapshot::load(&snapshot_path)?;
         let backup_dir = config_path
@@ -36,7 +39,14 @@ impl Session {
             .join(".code-profile-sync")
             .join("backups")
             .join(safety::timestamp());
-        Ok(Self { editor, config, config_path, snapshot, snapshot_path, backup_dir })
+        Ok(Self {
+            editor,
+            config,
+            config_path,
+            snapshot,
+            snapshot_path,
+            backup_dir,
+        })
     }
 
     fn save_config(&self, dry_run: bool) -> Result<()> {
@@ -63,7 +73,10 @@ impl Session {
             return Ok(());
         }
         while safety::editor_running(&self.editor) {
-            ui::warn(format!("{} appears to be running; writing now is unsafe.", self.editor.id()));
+            ui::warn(format!(
+                "{} appears to be running; writing now is unsafe.",
+                self.editor.id()
+            ));
             if g.non_interactive {
                 anyhow::bail!("editor is running; close it or pass --force");
             }
@@ -91,7 +104,11 @@ fn make_ctx<'a>(editor: &'a Editor, g: &GlobalArgs, backup_dir: PathBuf) -> Ctx<
 }
 
 fn header(editor: &Editor, config_path: &Path) {
-    ui::info(format!("Editor: {} ({})", editor.id(), editor.launcher.display()));
+    ui::info(format!(
+        "Editor: {} ({})",
+        editor.id(),
+        editor.launcher.display()
+    ));
     ui::info(format!("Config: {}", config_path.display()));
 }
 
@@ -118,8 +135,7 @@ fn apply_overrides(mut editor: Editor, config: Option<&Config>) -> Editor {
 /// Resolve which editor to operate on from args and an optional loaded config.
 fn resolve_editor(g: &GlobalArgs, config: Option<&Config>) -> Result<Editor> {
     if let Some(selector) = &g.editor {
-        return editor::find(selector)
-            .with_context(|| format!("no editor matched '{selector}'"));
+        return editor::find(selector).with_context(|| format!("no editor matched '{selector}'"));
     }
     if let Some(cfg) = config {
         if let Some(bin) = &cfg.editor.binary {
@@ -146,14 +162,19 @@ fn choose_editor(found: Vec<Editor>) -> Result<Editor> {
     let mut labels: Vec<String> = found.iter().map(|e| e.id().to_owned()).collect();
     labels.push("Enter a custom path…".to_owned());
     let choice = ui::select("Select an editor", &labels).context("reading editor choice")?;
-    if let Some(editor) = found.into_iter().nth(choice) { Ok(editor) } else {
+    if let Some(editor) = found.into_iter().nth(choice) {
+        Ok(editor)
+    } else {
         let path = ui::input("Path to the editor launcher or install directory")?;
         editor::from_path(Path::new(path.trim()))
     }
 }
 
 fn default_config_path(editor: &Editor) -> PathBuf {
-    let name = editor.product.application_name.replace([' ', '/', '\\'], "-");
+    let name = editor
+        .product
+        .application_name
+        .replace([' ', '/', '\\'], "-");
     PathBuf::from(format!("{name}.toml"))
 }
 
@@ -164,7 +185,10 @@ fn open_session(g: &GlobalArgs) -> Result<Session> {
         _ => None,
     };
     let editor = apply_overrides(resolve_editor(g, loaded.as_ref())?, loaded.as_ref());
-    let config_path = g.config.clone().unwrap_or_else(|| default_config_path(&editor));
+    let config_path = g
+        .config
+        .clone()
+        .unwrap_or_else(|| default_config_path(&editor));
     Session::open(editor, config_path)
 }
 
@@ -173,7 +197,10 @@ fn open_session(g: &GlobalArgs) -> Result<Session> {
 // ---------------------------------------------------------------------------
 
 /// List editors discovered on this machine.
-#[expect(clippy::unnecessary_wraps, reason = "uniform command signature for dispatch")]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "uniform command signature for dispatch"
+)]
 pub fn detect() -> Result<()> {
     let found = editor::discover();
     if found.is_empty() {
@@ -187,7 +214,10 @@ pub fn detect() -> Result<()> {
         ui::info(format!("{} [{}]", editor.id(), product.application_name));
         ui::detail(format!("name:       {} ({quality})", product.name_long));
         if let Some(commit) = &product.commit {
-            ui::detail(format!("commit:     {}", commit.get(..12).unwrap_or(commit)));
+            ui::detail(format!(
+                "commit:     {}",
+                commit.get(..12).unwrap_or(commit)
+            ));
         }
         ui::detail(format!("launcher:   {}", editor.launcher.display()));
         ui::detail(format!("user dir:   {}", editor.user_dir.display()));
@@ -302,7 +332,10 @@ pub fn sync(g: &GlobalArgs) -> Result<()> {
 
 fn require_config(session: &Session) -> Result<()> {
     if session.config.profiles.is_empty() && !session.config_path.is_file() {
-        anyhow::bail!("no config at {}; run `init` first", session.config_path.display());
+        anyhow::bail!(
+            "no config at {}; run `init` first",
+            session.config_path.display()
+        );
     }
     Ok(())
 }
@@ -330,13 +363,19 @@ pub fn interactive(g: &GlobalArgs) -> Result<()> {
             choose_editor(found)?
         }
     };
-    let config_path = g.config.clone().unwrap_or_else(|| default_config_path(&editor));
+    let config_path = g
+        .config
+        .clone()
+        .unwrap_or_else(|| default_config_path(&editor));
     let mut session = Session::open(apply_overrides(editor, None), config_path)?;
     header(&session.editor, &session.config_path);
 
     // 2. Offer to create a config from existing profiles when missing.
     if !session.config_path.is_file() {
-        if ui::confirm("No config found. Create one from the editor's current profiles?", true)? {
+        if ui::confirm(
+            "No config found. Create one from the editor's current profiles?",
+            true,
+        )? {
             session = create_config(session, g)?;
         } else {
             ui::info("Continuing with an empty config.");
