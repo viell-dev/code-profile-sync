@@ -667,9 +667,293 @@ fn union_names(
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::fs;
+    use std::path::{Path, PathBuf};
 
-    use super::{Decision, classify};
+    use anyhow::Result;
+    use serde_json::json;
+    use tempfile::{TempDir, tempdir};
+
+    use super::{Ctx, Decision, classify, pull, push, sync};
+    use crate::config::{Config, ProfileConfig};
+    use crate::editor::Editor;
+    use crate::editor::product::Product;
+    use crate::extension;
+    use crate::snapshot::{ProfileSnapshot, Snapshot};
+
+    struct Fixture {
+        _temp: TempDir,
+        editor: Editor,
+        backup_dir: PathBuf,
+        vendor_dir: PathBuf,
+    }
+
+    impl Fixture {
+        fn new() -> Result<Self> {
+            let temp = tempdir()?;
+            let user_dir = temp.path().join("User");
+            let extensions_dir = temp.path().join("extensions");
+            fs::create_dir_all(user_dir.join("profiles").join("-rust"))?;
+            fs::create_dir_all(user_dir.join("globalStorage"))?;
+            fs::create_dir_all(&extensions_dir)?;
+            write_json(
+                &user_dir.join("globalStorage").join("storage.json"),
+                &json!({
+                    "userDataProfiles": [
+                        {
+                            "location": "-rust",
+                            "name": "Rust",
+                            "icon": "package",
+                            "useDefaultFlags": { "keybindings": true }
+                        }
+                    ]
+                }),
+            )?;
+            write_json(&extensions_dir.join("extensions.json"), &json!([]))?;
+
+            let editor = Editor {
+                product: Product {
+                    name_short: "VSCodium".to_owned(),
+                    name_long: "VSCodium".to_owned(),
+                    application_name: "codium".to_owned(),
+                    data_folder_name: ".vscode-oss".to_owned(),
+                    quality: Some("stable".to_owned()),
+                    commit: Some("abc123".to_owned()),
+                },
+                launcher: PathBuf::from("codium"),
+                user_dir,
+                extensions_dir,
+            };
+            Ok(Self {
+                backup_dir: temp.path().join("backups"),
+                vendor_dir: temp.path().join("vendor").join("extensions"),
+                _temp: temp,
+                editor,
+            })
+        }
+
+        fn ctx(&self) -> Ctx<'_> {
+            Ctx {
+                editor: &self.editor,
+                dry_run: false,
+                non_interactive: true,
+                prefer: None,
+                profile_filter: None,
+                backup_dir: self.backup_dir.clone(),
+                vendor_dir: self.vendor_dir.clone(),
+            }
+        }
+
+        fn rust_settings_path(&self) -> PathBuf {
+            self.editor
+                .user_dir
+                .join("profiles")
+                .join("-rust")
+                .join("settings.json")
+        }
+
+        fn rust_extensions_path(&self) -> PathBuf {
+            self.editor
+                .user_dir
+                .join("profiles")
+                .join("-rust")
+                .join("extensions.json")
+        }
+
+        fn write_rust_settings(&self, settings: &serde_json::Value) -> Result<()> {
+            write_json(&self.rust_settings_path(), settings)
+        }
+
+        fn write_rust_extensions(&self, ids: &[&str]) -> Result<()> {
+            write_json(&self.rust_extensions_path(), &entries(ids))
+        }
+
+        fn write_pool_extensions(&self, ids: &[&str]) -> Result<()> {
+            write_json(
+                &self.editor.extensions_dir.join("extensions.json"),
+                &entries(ids),
+            )
+        }
+    }
+
+    fn write_json(path: &Path, value: &serde_json::Value) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut text = serde_json::to_string_pretty(value)?;
+        text.push('\n');
+        fs::write(path, text)?;
+        Ok(())
+    }
+
+    fn entries(ids: &[&str]) -> serde_json::Value {
+        serde_json::Value::Array(ids.iter().map(|id| entry(id)).collect())
+    }
+
+    fn entry(id: &str) -> serde_json::Value {
+        let relative = format!("{}-1.0.0", id.to_ascii_lowercase());
+        json!({
+            "identifier": { "id": id },
+            "version": "1.0.0",
+            "location": {
+                "$mid": 1,
+                "path": format!("/fake/extensions/{relative}"),
+                "scheme": "file"
+            },
+            "relativeLocation": relative,
+            "metadata": {
+                "source": "gallery",
+                "targetPlatform": "universal"
+            }
+        })
+    }
+
+    fn rust_config(settings: &[(&str, serde_json::Value)], extensions: &[&str]) -> Config {
+        let mut config = Config::default();
+        config.profiles.insert(
+            "Rust".to_owned(),
+            ProfileConfig {
+                settings: settings
+                    .iter()
+                    .map(|(key, value)| ((*key).to_owned(), value.clone()))
+                    .collect(),
+                extensions: extensions.iter().map(|id| (*id).to_owned()).collect(),
+                ..ProfileConfig::default()
+            },
+        );
+        config
+    }
+
+    #[test]
+    fn push_writes_settings_and_adds_pool_extension_to_named_profile() -> Result<()> {
+        let fixture = Fixture::new()?;
+        fixture.write_pool_extensions(&["Pub.One"])?;
+        let config = rust_config(&[("editor.tabSize", json!(2))], &["pub.one"]);
+        let mut snapshot = Snapshot::default();
+
+        push(&fixture.ctx(), &config, &mut snapshot)?;
+
+        let settings = crate::jsonc::read_object(&fixture.rust_settings_path())?;
+        assert_eq!(settings.get("editor.tabSize"), Some(&json!(2)));
+        assert_eq!(
+            extension::read_membership_file(&fixture.rust_extensions_path())?,
+            BTreeSet::from(["pub.one".to_owned()])
+        );
+        let rust = snapshot.profile("Rust");
+        assert_eq!(
+            rust.and_then(|profile| profile.settings.get("editor.tabSize")),
+            Some(&json!(2))
+        );
+        assert_eq!(
+            rust.map(|profile| profile.extensions.clone()),
+            Some(BTreeSet::from(["pub.one".to_owned()]))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pull_captures_editor_state_into_config_and_snapshot() -> Result<()> {
+        let fixture = Fixture::new()?;
+        fixture.write_pool_extensions(&["Pub.Editor"])?;
+        fixture.write_rust_settings(&json!({
+            "editor.formatOnSave": true,
+            "ignored.null": null
+        }))?;
+        fixture.write_rust_extensions(&["Pub.Editor"])?;
+        let mut config = Config::default();
+        let mut snapshot = Snapshot::default();
+
+        pull(&fixture.ctx(), &mut config, &mut snapshot)?;
+
+        let rust = config.profiles.get("Rust");
+        assert_eq!(
+            rust.and_then(|profile| profile.settings.get("editor.formatOnSave")),
+            Some(&json!(true))
+        );
+        assert_eq!(
+            rust.map(|profile| profile.extensions.clone()),
+            Some(vec!["pub.editor".to_owned()])
+        );
+        assert_eq!(
+            snapshot
+                .profile("Rust")
+                .and_then(|profile| profile.settings.get("ignored.null")),
+            None
+        );
+        assert_eq!(
+            snapshot
+                .profile("Rust")
+                .map(|profile| profile.extensions.clone()),
+            Some(BTreeSet::from(["pub.editor".to_owned()]))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sync_reconciles_repo_and_editor_changes_against_snapshot() -> Result<()> {
+        let fixture = Fixture::new()?;
+        fixture.write_pool_extensions(&["Pub.Base", "Pub.Repo"])?;
+        fixture.write_rust_settings(&json!({
+            "repo.changed": 1,
+            "editor.changed": "editor",
+            "repo.removed": true
+        }))?;
+        fixture.write_rust_extensions(&["Pub.Base"])?;
+
+        let mut config = rust_config(
+            &[
+                ("repo.changed", json!(2)),
+                ("editor.changed", json!("base")),
+                ("repo.added", json!(true)),
+            ],
+            &["pub.repo"],
+        );
+        let mut snapshot = Snapshot {
+            profiles: BTreeMap::from([(
+                "Rust".to_owned(),
+                ProfileSnapshot {
+                    settings: BTreeMap::from([
+                        ("repo.changed".to_owned(), json!(1)),
+                        ("editor.changed".to_owned(), json!("base")),
+                        ("repo.removed".to_owned(), json!(true)),
+                    ]),
+                    extensions: BTreeSet::from(["pub.base".to_owned()]),
+                },
+            )]),
+        };
+
+        sync(&fixture.ctx(), &mut config, &mut snapshot)?;
+
+        let settings = crate::jsonc::read_object(&fixture.rust_settings_path())?;
+        assert_eq!(settings.get("repo.changed"), Some(&json!(2)));
+        assert_eq!(settings.get("editor.changed"), Some(&json!("editor")));
+        assert_eq!(settings.get("repo.added"), Some(&json!(true)));
+        assert_eq!(settings.get("repo.removed"), None);
+        assert_eq!(
+            extension::read_membership_file(&fixture.rust_extensions_path())?,
+            BTreeSet::from(["pub.repo".to_owned()])
+        );
+
+        let rust = config.profiles.get("Rust");
+        assert_eq!(
+            rust.and_then(|profile| profile.settings.get("editor.changed")),
+            Some(&json!("editor"))
+        );
+        assert_eq!(
+            snapshot
+                .profile("Rust")
+                .and_then(|profile| profile.settings.get("repo.removed")),
+            None
+        );
+        assert_eq!(
+            snapshot
+                .profile("Rust")
+                .map(|profile| profile.extensions.clone()),
+            Some(BTreeSet::from(["pub.repo".to_owned()]))
+        );
+        Ok(())
+    }
 
     #[test]
     fn classify_three_way_truth_table() {

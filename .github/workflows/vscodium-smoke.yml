@@ -1,0 +1,74 @@
+name: VSCodium Smoke
+
+on:
+  workflow_dispatch:
+
+jobs:
+  extension-install:
+    name: Ubuntu VSCodium stable
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Install VSCodium stable
+        run: |
+          set -euo pipefail
+          wget -qO- https://gitlab.com/paulcarroty/vscodium-deb-rpm-repo/raw/master/pub.gpg \
+            | gpg --dearmor \
+            | sudo tee /usr/share/keyrings/vscodium-archive-keyring.gpg >/dev/null
+          echo 'deb [ signed-by=/usr/share/keyrings/vscodium-archive-keyring.gpg ] https://download.vscodium.com/debs vscodium main' \
+            | sudo tee /etc/apt/sources.list.d/vscodium.list
+          sudo apt-get update
+          sudo apt-get install -y codium jq xvfb
+
+      - name: Build CLI
+        run: cargo build
+
+      - name: Push config through VSCodium CLI extension fallback
+        env:
+          SMOKE_HOME: ${{ runner.temp }}/code-profile-sync-home
+          SMOKE_CONFIG: ${{ runner.temp }}/code-profile-sync-smoke/vscodium.toml
+          SMOKE_WRAPPER: ${{ runner.temp }}/codium-headless
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$SMOKE_CONFIG")" "$SMOKE_HOME"
+          cat >"$SMOKE_WRAPPER" <<'SH'
+          #!/usr/bin/env bash
+          exec xvfb-run -a codium --no-sandbox "$@"
+          SH
+          chmod +x "$SMOKE_WRAPPER"
+
+          USER_DIR="$SMOKE_HOME/.config/VSCodium/User"
+          EXTENSIONS_DIR="$SMOKE_HOME/.vscode-oss/extensions"
+          cat >"$SMOKE_CONFIG" <<EOF
+          [editor]
+          name = "VSCodium"
+          binary = "$SMOKE_WRAPPER"
+          user_dir = "$USER_DIR"
+          extensions_dir = "$EXTENSIONS_DIR"
+
+          [profiles.Smoke]
+          extensions = ["editorconfig.editorconfig"]
+          EOF
+
+          HOME="$SMOKE_HOME" \
+            XDG_CONFIG_HOME="$SMOKE_HOME/.config" \
+            target/debug/code-profile-sync \
+              --config "$SMOKE_CONFIG" \
+              --editor VSCodium \
+              --non-interactive \
+              --yes \
+              --force \
+              push
+
+          profile_extensions="$(find "$USER_DIR/profiles" -name extensions.json -print -quit)"
+          test -n "$profile_extensions"
+          jq -e 'map(.identifier.id | ascii_downcase) | index("editorconfig.editorconfig") != null' \
+            "$profile_extensions"
+          find "$EXTENSIONS_DIR" -maxdepth 1 -type d -iname 'editorconfig.editorconfig-*' \
+            | grep -q .

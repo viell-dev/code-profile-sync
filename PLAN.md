@@ -20,8 +20,10 @@ read/merge/write, extension install/uninstall via the editor CLI, running-editor
 atomic writes, backups, and `--dry-run`. Unit tests cover config layering, null
 stripping, id normalization, TOML round-tripping, the 3-way classify table,
 cross-platform path derivation, fake editor install discovery via `product.json`, and
-profile registry fixtures. GitHub Actions runs fmt, clippy, and tests on Linux, Windows,
-and macOS.
+profile registry fixtures. Engine fixture tests exercise `push`, `pull`, and `sync`
+against fake `User/` and extensions directories. GitHub Actions runs fmt, clippy, and
+tests on Linux, Windows, and macOS; a separate manual VSCodium smoke workflow exercises
+the real editor CLI extension-install fallback on Ubuntu.
 
 Deviations from the design below, kept deliberately simple for the MVP:
 
@@ -75,9 +77,9 @@ Near-term polish:
 - **Deep object merge** for settings layering (today: per-top-level-key replace, §2.3).
 
 Cross-platform & quality:
-- **Broader fixture tests + real-editor smoke** (below) — initial GitHub Actions and
-  fixture tests are in place; still expand engine fixtures and add an optional
-  real-editor smoke job.
+- **Broader fixture tests + manual real-editor smoke** (below) — initial engine fixtures
+  and a manual Ubuntu/VSCodium smoke workflow are in place; keep expanding fixture
+  coverage as new resources are added.
 - **Data-driven `editor/paths.rs`** — inject platform + env instead of `cfg!`, so the
   Windows/macOS path rules are unit-testable on a single Linux runner. ✅
 - **More editors** — the `product.json` layer makes new forks mostly free; verify VS Code
@@ -120,12 +122,19 @@ tool at them via env (`$HOME` / `$APPDATA` / `$XDG_CONFIG_HOME`) and the
 - **CI:** GitHub Actions runs formatting, clippy with warnings denied, and tests with
   `matrix.os: [ubuntu-latest, windows-latest, macos-latest]`.
 - **Current fixture coverage:** data-driven path derivation for Linux/macOS/Windows,
-  fake install-tree discovery through `product.json`, and fake `storage.json` profile
-  registries including stringified `userDataProfiles`.
-- **Real-editor smoke job** (separate / nightly / `workflow_dispatch`): install editors
-  per OS — VSCodium via `choco`/`brew`, VS Code via `choco`/`brew`/`winget`, Cursor
-  optional — and exercise the two parts that need a real binary: editor-CLI extension
-  install and running-process detection.
+  fake install-tree discovery through `product.json`, fake `storage.json` profile
+  registries including stringified `userDataProfiles`, and temp-backed engine tests for
+  `push`, `pull`, and `sync` over fake `User/` and extensions directories.
+- **Real-editor smoke:** `.github/workflows/vscodium-smoke.yml` is manual
+  (`workflow_dispatch`), Ubuntu only, VSCodium stable only. It installs VSCodium, builds
+  the CLI, runs `push` against temp `HOME`/`XDG_CONFIG_HOME` directories, forces the
+  editor CLI fallback to install `editorconfig.editorconfig`, and verifies profile
+  membership plus the shared pool folder. It is intentionally not scheduled and not a PR
+  gate yet, because package-manager, display, and Open VSX/network failures would add
+  noise to normal development.
+- **Future real-editor coverage:** add running-process detection to the manual smoke
+  workflow when that path next changes; consider VS Code/Cursor or PR-gated smoke only
+  after the manual VSCodium path proves stable.
 - **Code - OSS** has no clean Windows/macOS prebuilt (Linux distro only), so its coverage
   stays local; **VSCodium** is its cross-platform stand-in (same `dataFolderName`).
 
@@ -594,7 +603,8 @@ interactive conflicts (e.g. `dialoguer`/`inquire`). Avoid `rusqlite` — `state.
    resolution, first-run wizard + main menu (§3.5), close-the-editor gate, and switching
    editors from the menu. The default entry point.
 6. ⏳ **Hardening** — portable-install overrides, shared-extensions-dir-aware `gc`,
-   keybindings/snippets/tasks/MCP, data-driven paths, fixture + CI tests, more editors.
+   keybindings/snippets/tasks/MCP, more fixture tests as resources are added, more
+   editors.
    *(See "Remaining work / roadmap".)*
 7. ⏳ **GUI (later)** — select extensions from the editor's marketplace, assign to
    groups/profiles, visualize drift/conflicts. Core engine is a library the GUI calls;
