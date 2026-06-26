@@ -37,8 +37,11 @@ sandboxes, remote systems, or shared profile baselines.
   confirmed (`--dry-run`/`--yes`).
 - **Interactive by default:** run with no arguments → pick an editor (or enter a custom
   path), optionally create a config from the editor's current profiles, then a menu:
-  Sync / Push / Pull / consolidate / choose editor / exit. Each is also a direct subcommand
-  (`status`/`pull`/`push`/`sync`) for scripting.
+  Sync / Push / Pull / manage a single profile / consolidate / choose editor / exit. Each is
+  also a direct subcommand (`status`/`pull`/`push`/`sync`) for scripting.
+- **Per-profile actions:** "Manage a single profile" lists every profile (config and/or
+  editor, with in-sync state) and runs a scoped Status / Sync / Push / Pull / Delete on just
+  the one you pick, leaving the others untouched.
 - **Sync:** 3-way with per-item conflict resolution (keep editor / keep repo). You're
   prompted to close the editor before any write.
 - **App home:** default state lives under the platform app config directory, with

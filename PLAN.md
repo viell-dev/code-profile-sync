@@ -540,8 +540,13 @@ state is assumed; missing pieces are offered, not errored.
    - **Sync** — bidirectional 3-way reconcile with conflict prompts (§3.1–3.2).
    - **Push** — make the editor match the config (config → editor; REPLACES editor profiles).
    - **Pull** — make the config match the editor (editor → config; REPLACES config profiles).
-   - *(reserved)* — placeholder for a later action (e.g. manage groups / per-profile
-     extension picking). Listed but inert in v1.
+   - **Manage a single profile…** — show an overview of every profile (config and/or
+     editor, with in-sync state), pick one, then run a **scoped** action on just that
+     profile: Status / Sync / Push / Pull / Delete. Scoped actions are overlay (like
+     `--profile`), so other profiles are never created or deleted. Enables manual workflows
+     like "pull one profile, then push the full config."
+   - **Consolidate** — hoist settings/extensions shared by all profiles into `[global]`.
+   - **Choose a different editor** — re-select the target editor without restarting.
    - **Exit.**
 4. **Close-the-editor gate.** Before *any* action that writes (Sync / either Overwrite),
    check whether the selected editor is running (§3.4). If it is, **prompt the user to
