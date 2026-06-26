@@ -27,8 +27,12 @@ Deviations from the design below, kept deliberately simple for the MVP:
   only through `sync` (snapshot-gated). A destructive `--prune` push is future work.
 - **Settings are null-free** — JSON `null` is stripped at the read boundary (TOML has no
   null), so settings explicitly set to `null` are not managed.
-- **Extensions go through the editor CLI** for both install and uninstall (the "direct
-  edit `extensions.json`" half of the hybrid plan is not yet implemented).
+- **Extension adds are hybrid** — if the extension already exists in the shared pool, its
+  catalog entry is copied straight into the profile's `extensions.json` (no marketplace,
+  works for extensions not on Open VSX); otherwise the editor CLI fetches it. Removals
+  edit the membership list directly and never delete shared files; removing from the
+  **Default** profile is refused (its list is the shared pool). Failed installs are
+  reported and skipped, never aborting the run.
 - **No JSON Schema yet** — generated configs carry a plain header instead of a `#:schema`
   directive. A `schemars`-derived schema (PLAN §2.1) is still optional/future.
 - **Keybindings / snippets / tasks / MCP** are not synced yet.

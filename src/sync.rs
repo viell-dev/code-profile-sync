@@ -11,6 +11,7 @@ use crate::cli::Prefer;
 use crate::config::{Config, ProfileConfig, Resolved};
 use crate::editor::Editor;
 use crate::editor::profiles::{self, Profile};
+use crate::extension::Catalog;
 use crate::snapshot::{ProfileSnapshot, Snapshot};
 use crate::{extension, jsonc, safety, ui};
 
@@ -215,6 +216,8 @@ fn baseline(config: &Config, name: &str) -> Resolved {
 pub fn push(ctx: &Ctx<'_>, config: &Config, snapshot: &mut Snapshot) -> Result<()> {
     let resolved = config.resolve();
     let mut editors = editor_profiles(ctx.editor)?;
+    let catalog = extension::pool_catalog(ctx.editor)?;
+    let mut failures = 0_usize;
 
     for (name, want) in &resolved {
         if !ctx.wants(name) {
@@ -236,33 +239,44 @@ pub fn push(ctx: &Ctx<'_>, config: &Config, snapshot: &mut Snapshot) -> Result<(
             apply_settings(ctx, &profile, &sets, &[])?;
         }
 
-        // Extensions: install any missing desired ones.
+        // Extensions: install any missing desired ones (non-destructive).
         if effective_inherits(want, &profile, "extensions") {
             ui::bullet(format!(
                 "{name}: inherits extensions from Default (skipped)"
             ));
         } else {
             let current = extension::read_membership(ctx.editor, &profile)?;
-            for id in want.extensions.difference(&current) {
-                install_ext(ctx, &profile, id)?;
-            }
-            for id in current.difference(&want.extensions) {
-                ui::detail(format!(
-                    "{name}: editor-only extension left installed: {id}"
-                ));
-            }
+            failures = failures.saturating_add(apply_extensions(
+                ctx,
+                &profile,
+                &want.extensions,
+                &current,
+                &catalog,
+                false,
+            ));
         }
 
-        let final_settings = read_actual(ctx.editor, &profile)?;
+        let final_state = read_actual(ctx.editor, &profile)?;
         snapshot.profiles.insert(
             name.clone(),
             ProfileSnapshot {
-                settings: final_settings.settings,
-                extensions: final_settings.extensions,
+                settings: final_state.settings,
+                extensions: final_state.extensions,
             },
         );
     }
+    report_failures(failures);
     Ok(())
+}
+
+/// Warn about extensions that could not be installed/removed, without failing
+/// the whole run (the snapshot still reflects what actually happened).
+fn report_failures(failures: usize) {
+    if failures > 0 {
+        ui::warn(format!(
+            "{failures} extension operation(s) failed; see warnings above"
+        ));
+    }
 }
 
 fn effective_inherits(want: &Resolved, profile: &Profile, resource: &str) -> bool {
@@ -281,6 +295,8 @@ pub fn sync(ctx: &Ctx<'_>, config: &mut Config, snapshot: &mut Snapshot) -> Resu
     let resolved = config.resolve();
     let editors = editor_profiles(ctx.editor)?;
     let names = union_names(&resolved, &editors);
+    let catalog = extension::pool_catalog(ctx.editor)?;
+    let mut failures = 0_usize;
 
     for name in names {
         if !ctx.wants(&name) {
@@ -312,17 +328,20 @@ pub fn sync(ctx: &Ctx<'_>, config: &mut Config, snapshot: &mut Snapshot) -> Resu
             apply_settings(ctx, &profile, &settings, &removes)?;
         }
         if !effective_inherits(&want, &profile, "extensions") {
-            for id in exts.difference(&actual.extensions) {
-                install_ext(ctx, &profile, id)?;
-            }
-            for id in actual.extensions.difference(&exts) {
-                uninstall_ext(ctx, &profile, id)?;
-            }
+            failures = failures.saturating_add(apply_extensions(
+                ctx,
+                &profile,
+                &exts,
+                &actual.extensions,
+                &catalog,
+                true,
+            ));
         }
 
         // Apply to config + snapshot.
         capture_profile(config, snapshot, &name, &profile, &settings, &exts);
     }
+    report_failures(failures);
     Ok(())
 }
 
@@ -495,22 +514,84 @@ fn apply_settings(
     Ok(())
 }
 
-fn install_ext(ctx: &Ctx<'_>, profile: &Profile, id: &str) -> Result<()> {
+/// Install missing extensions and (when `prune`) remove extras. Failures are
+/// reported and counted, never aborting the run.
+fn apply_extensions(
+    ctx: &Ctx<'_>,
+    profile: &Profile,
+    desired: &BTreeSet<String>,
+    current: &BTreeSet<String>,
+    catalog: &Catalog,
+    prune: bool,
+) -> usize {
+    let mut failures = 0_usize;
+    for id in desired.difference(current) {
+        if let Err(err) = install_ext(ctx, profile, id, catalog) {
+            ui::warn(format!(
+                "could not install {id} into {}: {err:#}",
+                profile.name
+            ));
+            failures = failures.saturating_add(1);
+        }
+    }
+    for id in current.difference(desired) {
+        if prune {
+            if let Err(err) = uninstall_ext(ctx, profile, id) {
+                ui::warn(format!(
+                    "could not remove {id} from {}: {err:#}",
+                    profile.name
+                ));
+                failures = failures.saturating_add(1);
+            }
+        } else {
+            ui::detail(format!(
+                "{}: editor-only extension left installed: {id}",
+                profile.name
+            ));
+        }
+    }
+    failures
+}
+
+fn install_ext(ctx: &Ctx<'_>, profile: &Profile, id: &str, catalog: &Catalog) -> Result<()> {
+    let source = if catalog.contains_key(id) {
+        "from pool"
+    } else {
+        "via CLI"
+    };
     if ctx.dry_run {
-        ui::bullet(format!("would install {id} into {}", profile.name));
+        ui::bullet(format!(
+            "would install {id} into {} ({source})",
+            profile.name
+        ));
         return Ok(());
     }
-    ui::bullet(format!("installing {id} into {}", profile.name));
-    extension::install(ctx.editor, profile.cli_profile(), id)
+    let method = extension::add_member(ctx.editor, profile, id, catalog, &ctx.backup_dir)?;
+    let how = match method {
+        extension::AddMethod::Pool => "from pool",
+        extension::AddMethod::Cli => "via CLI",
+    };
+    ui::bullet(format!("installed {id} into {} ({how})", profile.name));
+    Ok(())
 }
 
 fn uninstall_ext(ctx: &Ctx<'_>, profile: &Profile, id: &str) -> Result<()> {
-    if ctx.dry_run {
-        ui::bullet(format!("would uninstall {id} from {}", profile.name));
+    // The Default profile's list is the shared pool catalog; removing from it
+    // would affect every editor sharing the pool, so leave it alone.
+    if profile.is_default() {
+        ui::warn(format!(
+            "not removing {id} from Default (shared extension pool)"
+        ));
         return Ok(());
     }
-    ui::bullet(format!("uninstalling {id} from {}", profile.name));
-    extension::uninstall(ctx.editor, profile.cli_profile(), id)
+    if ctx.dry_run {
+        ui::bullet(format!("would remove {id} from {}", profile.name));
+        return Ok(());
+    }
+    if extension::remove_member(ctx.editor, profile, id, &ctx.backup_dir)? {
+        ui::bullet(format!("removed {id} from {}", profile.name));
+    }
+    Ok(())
 }
 
 /// Create a named profile in the editor's registry and return its model.

@@ -28,8 +28,10 @@ default" inheritance (e.g. profiles that share the default keybindings).
   also a direct subcommand (`status`/`pull`/`push`/`sync`) for scripting.
 - **Sync:** 3-way with per-item conflict resolution (keep editor / keep repo). You're
   prompted to close the editor before any write.
-- **Extensions:** installs/uninstalls go through the editor's own CLI (no marketplace
-  lookups of our own). IDs enter a config by hand or via `pull`.
+- **Extensions:** if already installed in the shared pool, membership is added directly
+  (works even for extensions not on the editor's marketplace); otherwise the editor's own
+  CLI fetches it. No marketplace lookups of our own. IDs enter a config by hand or via
+  `pull`.
 
 ## Usage
 
