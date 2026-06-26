@@ -27,12 +27,24 @@ Deviations from the design below, kept deliberately simple for the MVP:
   only through `sync` (snapshot-gated). A destructive `--prune` push is future work.
 - **Settings are null-free** — JSON `null` is stripped at the read boundary (TOML has no
   null), so settings explicitly set to `null` are not managed.
-- **Extension adds are hybrid** — if the extension already exists in the shared pool, its
-  catalog entry is copied straight into the profile's `extensions.json` (no marketplace,
-  works for extensions not on Open VSX); otherwise the editor CLI fetches it. Removals
-  edit the membership list directly and never delete shared files; removing from the
+- **Extension adds are tiered** — pool → vendored copy → editor CLI. If the extension is
+  already in the shared pool, its catalog entry is copied into the profile's
+  `extensions.json` (no marketplace; works for extensions not on Open VSX); else a
+  vendored copy in the repo is restored; else the editor CLI fetches it. Removals edit
+  the membership list directly and never delete shared files; removing from the
   **Default** profile is refused (its list is the shared pool). Failed installs are
   reported and skipped, never aborting the run.
+- **Local (VSIX-source) extensions are vendored** — on pull/sync, extensions whose pool
+  entry has `metadata.source == "vsix"` are copied into `<config_dir>/vendor/extensions/`
+  (folder + a sidecar of the catalog entry) so the config is portable. On push they are
+  restored from there onto machines that don't have them installed (the path is rewritten
+  to the local pool). Verified by vendoring from VSCodium and restoring onto a fresh
+  extensions directory.
+- **Consolidation** (`Config::consolidate`) hoists settings/extensions common to every
+  profile into `[global]`, behavior-preservingly. Default-on at `init`; also an
+  interactive menu action.
+- **Interactive menu** can switch the target editor ("Choose a different editor") without
+  restarting.
 - **No JSON Schema yet** — generated configs carry a plain header instead of a `#:schema`
   directive. A `schemars`-derived schema (PLAN §2.1) is still optional/future.
 - **Keybindings / snippets / tasks / MCP** are not synced yet.

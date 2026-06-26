@@ -49,10 +49,10 @@ Toolchain is pinned in `rust-toolchain.toml` (don't bump without reason).
 - **Extensions are a shared install + per-profile membership list.** `extensions.json`
   entries with no corresponding folder in the shared dir dangle. `location.path` is
   machine-specific; portable identity is `identifier.id` + `version`. Writes are
-  **hybrid** (direct-edit if on disk, else editor CLI). Local `.vsix` files (vendored
-  in `vendor/extensions/`) install via the editor CLI; their `source` is local/vsix,
-  not `gallery`, so keep them out of marketplace-update logic. Removing from a profile
-  must not delete the shared folder.
+  **tiered**: shared pool → vendored copy → editor CLI. VSIX-source extensions
+  (`metadata.source == "vsix"`) are vendored into `<config_dir>/vendor/extensions/`
+  (folder + `<relativeLocation>.entry.json` sidecar) on pull/sync and restored on push.
+  Removing from a profile must not delete the shared folder.
 - **The Default profile** lives at `User/` root, not under `User/profiles/`.
 - **Shared extensions pool:** Code - OSS and VSCodium both default `dataFolderName` to
   `.vscode-oss`, so they share `~/.vscode-oss/extensions` while keeping separate

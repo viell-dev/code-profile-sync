@@ -21,6 +21,7 @@ struct Session {
     snapshot: Snapshot,
     snapshot_path: PathBuf,
     backup_dir: PathBuf,
+    vendor_dir: PathBuf,
 }
 
 impl Session {
@@ -33,12 +34,15 @@ impl Session {
         };
         let snapshot_path = snapshot::path_for(&config_path, editor.id());
         let snapshot = Snapshot::load(&snapshot_path)?;
-        let backup_dir = config_path
+        let config_dir = config_path
             .parent()
             .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let backup_dir = config_dir
             .join(".code-profile-sync")
             .join("backups")
             .join(safety::timestamp());
+        let vendor_dir = config_dir.join("vendor").join("extensions");
         Ok(Self {
             editor,
             config,
@@ -46,6 +50,7 @@ impl Session {
             snapshot,
             snapshot_path,
             backup_dir,
+            vendor_dir,
         })
     }
 
@@ -92,7 +97,12 @@ impl Session {
 
 /// Build an engine context borrowing only the editor field, so other session
 /// fields (config, snapshot) remain independently borrowable.
-fn make_ctx<'a>(editor: &'a Editor, g: &GlobalArgs, backup_dir: PathBuf) -> Ctx<'a> {
+fn make_ctx<'a>(
+    editor: &'a Editor,
+    g: &GlobalArgs,
+    backup_dir: PathBuf,
+    vendor_dir: PathBuf,
+) -> Ctx<'a> {
     Ctx {
         editor,
         dry_run: g.dry_run,
@@ -100,6 +110,7 @@ fn make_ctx<'a>(editor: &'a Editor, g: &GlobalArgs, backup_dir: PathBuf) -> Ctx<
         prefer: g.prefer,
         profile_filter: g.profile.clone(),
         backup_dir,
+        vendor_dir,
     }
 }
 
@@ -256,7 +267,12 @@ pub fn status(g: &GlobalArgs) -> Result<()> {
     if !session.config_path.is_file() {
         ui::warn("no config yet; run `init` or the interactive flow to create one");
     }
-    let ctx = make_ctx(&session.editor, g, session.backup_dir.clone());
+    let ctx = make_ctx(
+        &session.editor,
+        g,
+        session.backup_dir.clone(),
+        session.vendor_dir.clone(),
+    );
     sync::status(&ctx, &session.config)
 }
 
@@ -282,7 +298,12 @@ fn run_init(mut session: Session, g: &GlobalArgs) -> Result<()> {
     session.config.editor.name = Some(session.editor.id().to_owned());
     session.snapshot = Snapshot::default();
     ui::heading("Importing profiles from editor");
-    let ctx = make_ctx(&session.editor, g, session.backup_dir.clone());
+    let ctx = make_ctx(
+        &session.editor,
+        g,
+        session.backup_dir.clone(),
+        session.vendor_dir.clone(),
+    );
     sync::pull(&ctx, &mut session.config, &mut session.snapshot)?;
     drop(ctx);
 
@@ -319,7 +340,12 @@ pub fn push(g: &GlobalArgs) -> Result<()> {
     session.ensure_editor_closed(g)?;
     let mut session = session;
     ui::heading("Pushing config to editor");
-    let ctx = make_ctx(&session.editor, g, session.backup_dir.clone());
+    let ctx = make_ctx(
+        &session.editor,
+        g,
+        session.backup_dir.clone(),
+        session.vendor_dir.clone(),
+    );
     sync::push(&ctx, &session.config, &mut session.snapshot)?;
     session.save_snapshot(g.dry_run)?;
     Ok(())
@@ -330,7 +356,12 @@ pub fn pull(g: &GlobalArgs) -> Result<()> {
     let mut session = open_session(g)?;
     header(&session.editor, &session.config_path);
     ui::heading("Pulling editor into config");
-    let ctx = make_ctx(&session.editor, g, session.backup_dir.clone());
+    let ctx = make_ctx(
+        &session.editor,
+        g,
+        session.backup_dir.clone(),
+        session.vendor_dir.clone(),
+    );
     sync::pull(&ctx, &mut session.config, &mut session.snapshot)?;
     session.save_config(g.dry_run)?;
     session.save_snapshot(g.dry_run)?;
@@ -344,7 +375,12 @@ pub fn sync(g: &GlobalArgs) -> Result<()> {
     require_config(&session)?;
     session.ensure_editor_closed(g)?;
     let mut session = session;
-    let ctx = make_ctx(&session.editor, g, session.backup_dir.clone());
+    let ctx = make_ctx(
+        &session.editor,
+        g,
+        session.backup_dir.clone(),
+        session.vendor_dir.clone(),
+    );
     sync::sync(&ctx, &mut session.config, &mut session.snapshot)?;
     session.save_config(g.dry_run)?;
     session.save_snapshot(g.dry_run)?;
@@ -371,27 +407,38 @@ pub fn interactive(g: &GlobalArgs) -> Result<()> {
         anyhow::bail!("--non-interactive requires a subcommand");
     }
 
-    // 1. Select an editor.
+    // 1. Select an editor (honoring --editor for the first pick).
     let editor = if let Some(selector) = &g.editor {
         editor::find(selector).with_context(|| format!("no editor matched '{selector}'"))?
     } else {
-        let found = editor::discover();
-        if found.is_empty() {
-            ui::warn("no editors found on PATH");
-            let path = ui::input("Path to the editor launcher or install directory")?;
-            editor::from_path(Path::new(path.trim()))?
-        } else {
-            choose_editor(found)?
-        }
+        pick_editor()?
     };
+    let session = prepare_session(g, editor)?;
+
+    // 2. Main menu.
+    menu_loop(session, g)
+}
+
+/// Interactively pick a discovered editor (or a custom path).
+fn pick_editor() -> Result<Editor> {
+    let found = editor::discover();
+    if found.is_empty() {
+        ui::warn("no editors found on PATH");
+        let path = ui::input("Path to the editor launcher or install directory")?;
+        editor::from_path(Path::new(path.trim()))
+    } else {
+        choose_editor(found)
+    }
+}
+
+/// Open a session for `editor`, offering to create a config when none exists.
+fn prepare_session(g: &GlobalArgs, editor: Editor) -> Result<Session> {
     let config_path = g
         .config
         .clone()
         .unwrap_or_else(|| default_config_path(&editor));
     let mut session = Session::open(apply_overrides(editor, None), config_path)?;
     header(&session.editor, &session.config_path);
-
-    // 2. Offer to create a config from existing profiles when missing.
     if !session.config_path.is_file() {
         if ui::confirm(
             "No config found. Create one from the editor's current profiles?",
@@ -402,9 +449,7 @@ pub fn interactive(g: &GlobalArgs) -> Result<()> {
             ui::info("Continuing with an empty config.");
         }
     }
-
-    // 3. Main menu.
-    menu_loop(session, g)
+    Ok(session)
 }
 
 fn create_config(session: Session, g: &GlobalArgs) -> Result<Session> {
@@ -420,6 +465,7 @@ fn menu_loop(mut session: Session, g: &GlobalArgs) -> Result<()> {
         "Overwrite profiles from config (push)",
         "Overwrite config from profiles (pull)",
         "Consolidate shared settings/extensions into [global]",
+        "Choose a different editor",
         "Exit",
     ];
     loop {
@@ -428,7 +474,12 @@ fn menu_loop(mut session: Session, g: &GlobalArgs) -> Result<()> {
         match choice {
             0 => {
                 session.ensure_editor_closed(g)?;
-                let ctx = make_ctx(&session.editor, g, session.backup_dir.clone());
+                let ctx = make_ctx(
+                    &session.editor,
+                    g,
+                    session.backup_dir.clone(),
+                    session.vendor_dir.clone(),
+                );
                 sync::sync(&ctx, &mut session.config, &mut session.snapshot)?;
                 session.save_config(g.dry_run)?;
                 session.save_snapshot(g.dry_run)?;
@@ -436,13 +487,23 @@ fn menu_loop(mut session: Session, g: &GlobalArgs) -> Result<()> {
             1 => {
                 session.ensure_editor_closed(g)?;
                 ui::heading("Pushing config to editor");
-                let ctx = make_ctx(&session.editor, g, session.backup_dir.clone());
+                let ctx = make_ctx(
+                    &session.editor,
+                    g,
+                    session.backup_dir.clone(),
+                    session.vendor_dir.clone(),
+                );
                 sync::push(&ctx, &session.config, &mut session.snapshot)?;
                 session.save_snapshot(g.dry_run)?;
             }
             2 => {
                 ui::heading("Pulling editor into config");
-                let ctx = make_ctx(&session.editor, g, session.backup_dir.clone());
+                let ctx = make_ctx(
+                    &session.editor,
+                    g,
+                    session.backup_dir.clone(),
+                    session.vendor_dir.clone(),
+                );
                 sync::pull(&ctx, &mut session.config, &mut session.snapshot)?;
                 session.save_config(g.dry_run)?;
                 session.save_snapshot(g.dry_run)?;
@@ -450,6 +511,9 @@ fn menu_loop(mut session: Session, g: &GlobalArgs) -> Result<()> {
             3 => {
                 run_consolidate(&mut session);
                 session.save_config(g.dry_run)?;
+            }
+            4 => {
+                session = prepare_session(g, pick_editor()?)?;
             }
             _ => return Ok(()),
         }

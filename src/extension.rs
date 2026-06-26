@@ -28,6 +28,8 @@ pub type Catalog = BTreeMap<String, Value>;
 pub enum AddMethod {
     /// Copied from the shared pool catalog (already installed on disk).
     Pool,
+    /// Restored from a vendored copy in the repo.
+    Vendor,
     /// Fetched and installed via the editor CLI.
     Cli,
 }
@@ -64,17 +66,21 @@ pub fn pool_catalog(editor: &Editor) -> Result<Catalog> {
     Ok(catalog)
 }
 
-/// Ensure `id` is a member of `profile`. Adds from the shared pool when the
-/// extension is already installed; otherwise fetches it via the editor CLI.
+/// Ensure `id` is a member of `profile`. Tries, in order: the shared pool (if
+/// already installed), a vendored copy in the repo, then the editor CLI.
 pub fn add_member(
     editor: &Editor,
     profile: &Profile,
     id: &str,
     catalog: &Catalog,
+    vendor_dir: &Path,
     backup_dir: &Path,
 ) -> Result<AddMethod> {
     if add_from_catalog(editor, profile, id, catalog, backup_dir)? {
         return Ok(AddMethod::Pool);
+    }
+    if add_from_vendor(editor, profile, id, vendor_dir, backup_dir)? {
+        return Ok(AddMethod::Vendor);
     }
     run_cli(
         editor,
@@ -83,6 +89,46 @@ pub fn add_member(
     )
     .with_context(|| format!("installing extension {id}"))?;
     Ok(AddMethod::Cli)
+}
+
+/// Copy local (VSIX-source) extensions referenced by `ids` from the pool into
+/// `vendor_dir` so the config is portable to machines without them installed.
+/// Returns the number of extensions vendored.
+pub fn vendor_local(
+    editor: &Editor,
+    catalog: &Catalog,
+    ids: &BTreeSet<String>,
+    vendor_dir: &Path,
+    dry_run: bool,
+) -> Result<usize> {
+    let mut count = 0_usize;
+    for id in ids {
+        let Some(entry) = catalog.get(id) else {
+            continue;
+        };
+        if entry_source(entry).as_deref() != Some("vsix") {
+            continue;
+        }
+        let Some(rel) = relative_location(entry) else {
+            continue;
+        };
+        let source = editor.extensions_dir.join(&rel);
+        if !source.is_dir() {
+            continue;
+        }
+        count = count.saturating_add(1);
+        if dry_run {
+            continue;
+        }
+        let dest = vendor_dir.join(&rel);
+        if !dest.is_dir() {
+            copy_dir(&source, &dest)?;
+        }
+        let sidecar = vendor_dir.join(format!("{rel}.entry.json"));
+        let text = serde_json::to_string_pretty(entry).context("serializing vendored entry")?;
+        safety::atomic_write(&sidecar, &text)?;
+    }
+    Ok(count)
 }
 
 /// Remove `id` from a profile's membership list (never deletes shared files).
@@ -124,6 +170,107 @@ fn add_from_catalog(
     entries.push(entry.clone());
     write_entries(&path, &entries, backup_dir)?;
     Ok(true)
+}
+
+/// Restore a vendored extension: copy its folder into the pool (if missing),
+/// fix its on-disk location, and add it to the profile's membership list.
+/// Returns `false` when no vendored copy of `id` exists.
+fn add_from_vendor(
+    editor: &Editor,
+    profile: &Profile,
+    id: &str,
+    vendor_dir: &Path,
+    backup_dir: &Path,
+) -> Result<bool> {
+    let Some((mut entry, rel)) = find_vendored(vendor_dir, id)? else {
+        return Ok(false);
+    };
+    let vendored = vendor_dir.join(&rel);
+    if !vendored.is_dir() {
+        return Ok(false);
+    }
+    let pool_folder = editor.extensions_dir.join(&rel);
+    if !pool_folder.is_dir() {
+        copy_dir(&vendored, &pool_folder)?;
+    }
+    // Point the entry at this machine's pool location.
+    if let Value::Object(map) = &mut entry {
+        map.insert(
+            "location".to_owned(),
+            serde_json::json!({
+                "$mid": 1,
+                "path": pool_folder.to_string_lossy(),
+                "scheme": "file",
+            }),
+        );
+    }
+
+    let path = profile.extensions_path(editor);
+    let mut entries = read_entries(&path)?;
+    if entries.iter().any(|e| entry_id(e).as_deref() == Some(id)) {
+        return Ok(true);
+    }
+    entries.push(entry);
+    write_entries(&path, &entries, backup_dir)?;
+    Ok(true)
+}
+
+/// Find a vendored extension by id, returning its catalog entry and relative
+/// location.
+fn find_vendored(vendor_dir: &Path, id: &str) -> Result<Option<(Value, String)>> {
+    if !vendor_dir.is_dir() {
+        return Ok(None);
+    }
+    for dir_entry in
+        fs::read_dir(vendor_dir).with_context(|| format!("reading {}", vendor_dir.display()))?
+    {
+        let path = dir_entry?.path();
+        let is_sidecar = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".entry.json"));
+        if !is_sidecar {
+            continue;
+        }
+        let raw =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let entry: Value =
+            serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+        if entry_id(&entry).as_deref() == Some(id)
+            && let Some(rel) = relative_location(&entry)
+        {
+            return Ok(Some((entry, rel)));
+        }
+    }
+    Ok(None)
+}
+
+/// Recursively copy a directory tree.
+fn copy_dir(source: &Path, dest: &Path) -> Result<()> {
+    fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
+    for child in fs::read_dir(source).with_context(|| format!("reading {}", source.display()))? {
+        let child = child?;
+        let from = child.path();
+        let to = dest.join(child.file_name());
+        if from.is_dir() {
+            copy_dir(&from, &to)?;
+        } else {
+            fs::copy(&from, &to).with_context(|| format!("copying {}", from.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn entry_source(entry: &Value) -> Option<String> {
+    entry
+        .get("metadata")?
+        .get("source")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn relative_location(entry: &Value) -> Option<String> {
+    entry.get("relativeLocation")?.as_str().map(str::to_owned)
 }
 
 /// Read the raw entry list from an `extensions.json` file (empty if missing).

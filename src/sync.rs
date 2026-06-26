@@ -23,6 +23,8 @@ pub struct Ctx<'a> {
     pub prefer: Option<Prefer>,
     pub profile_filter: Option<String>,
     pub backup_dir: PathBuf,
+    /// Directory where local (VSIX-source) extensions are vendored for portability.
+    pub vendor_dir: PathBuf,
 }
 
 impl Ctx<'_> {
@@ -132,11 +134,14 @@ fn report_drift(want: &Resolved, actual: &Actual) {
 /// editor's state expressed as a delta over the profile's groups.
 pub fn pull(ctx: &Ctx<'_>, config: &mut Config, snapshot: &mut Snapshot) -> Result<()> {
     let editors = editor_profiles(ctx.editor)?;
+    let catalog = extension::pool_catalog(ctx.editor)?;
+    let mut all_extensions: BTreeSet<String> = BTreeSet::new();
     for (name, profile) in &editors {
         if !ctx.wants(name) {
             continue;
         }
         let actual = read_actual(ctx.editor, profile)?;
+        all_extensions.extend(actual.extensions.iter().cloned());
         capture_profile(
             config,
             snapshot,
@@ -151,6 +156,7 @@ pub fn pull(ctx: &Ctx<'_>, config: &mut Config, snapshot: &mut Snapshot) -> Resu
             actual.extensions.len()
         ));
     }
+    vendor_step(ctx, &catalog, &all_extensions);
     Ok(())
 }
 
@@ -314,6 +320,7 @@ pub fn sync(ctx: &Ctx<'_>, config: &mut Config, snapshot: &mut Snapshot) -> Resu
     let names = union_names(&resolved, &editors);
     let catalog = extension::pool_catalog(ctx.editor)?;
     let mut failures = 0_usize;
+    let mut all_extensions: BTreeSet<String> = BTreeSet::new();
 
     for name in names {
         if !ctx.wants(&name) {
@@ -356,8 +363,10 @@ pub fn sync(ctx: &Ctx<'_>, config: &mut Config, snapshot: &mut Snapshot) -> Resu
         }
 
         // Apply to config + snapshot.
+        all_extensions.extend(exts.iter().cloned());
         capture_profile(config, snapshot, &name, &profile, &settings, &exts);
     }
+    vendor_step(ctx, &catalog, &all_extensions);
     report_failures(failures);
     Ok(())
 }
@@ -571,25 +580,34 @@ fn apply_extensions(
 }
 
 fn install_ext(ctx: &Ctx<'_>, profile: &Profile, id: &str, catalog: &Catalog) -> Result<()> {
-    let source = if catalog.contains_key(id) {
-        "from pool"
-    } else {
-        "via CLI"
-    };
     if ctx.dry_run {
-        ui::bullet(format!(
-            "would install {id} into {} ({source})",
-            profile.name
-        ));
+        ui::bullet(format!("would install {id} into {}", profile.name));
         return Ok(());
     }
-    let method = extension::add_member(ctx.editor, profile, id, catalog, &ctx.backup_dir)?;
+    let method = extension::add_member(
+        ctx.editor,
+        profile,
+        id,
+        catalog,
+        &ctx.vendor_dir,
+        &ctx.backup_dir,
+    )?;
     let how = match method {
         extension::AddMethod::Pool => "from pool",
+        extension::AddMethod::Vendor => "from vendored copy",
         extension::AddMethod::Cli => "via CLI",
     };
     ui::bullet(format!("installed {id} into {} ({how})", profile.name));
     Ok(())
+}
+
+/// Vendor local (VSIX-source) extensions referenced by `ids` into the repo.
+fn vendor_step(ctx: &Ctx<'_>, catalog: &Catalog, ids: &BTreeSet<String>) {
+    match extension::vendor_local(ctx.editor, catalog, ids, &ctx.vendor_dir, ctx.dry_run) {
+        Ok(0) => {}
+        Ok(n) => ui::bullet(format!("vendored {n} local extension(s)")),
+        Err(err) => ui::warn(format!("vendoring local extensions failed: {err:#}")),
+    }
 }
 
 fn uninstall_ext(ctx: &Ctx<'_>, profile: &Profile, id: &str) -> Result<()> {

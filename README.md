@@ -28,10 +28,13 @@ default" inheritance (e.g. profiles that share the default keybindings).
   also a direct subcommand (`status`/`pull`/`push`/`sync`) for scripting.
 - **Sync:** 3-way with per-item conflict resolution (keep editor / keep repo). You're
   prompted to close the editor before any write.
-- **Extensions:** if already installed in the shared pool, membership is added directly
-  (works even for extensions not on the editor's marketplace); otherwise the editor's own
-  CLI fetches it. No marketplace lookups of our own. IDs enter a config by hand or via
-  `pull`.
+- **Extensions:** adds are tiered — shared pool → vendored copy → editor CLI (no
+  marketplace lookups of our own). Local **VSIX-source** extensions are vendored into
+  `<config_dir>/vendor/extensions/` on pull/sync and restored from there on push, so a
+  config is portable even for extensions that aren't on any marketplace. IDs enter a
+  config by hand or via `pull`.
+- **Interactive extras:** the menu can consolidate shared settings/extensions into
+  `[global]` and switch the target editor without restarting.
 
 ## Usage
 
