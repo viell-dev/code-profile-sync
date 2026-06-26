@@ -154,3 +154,72 @@ fn name_variants(launcher: &Path) -> Vec<String> {
     }
     names
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+
+    use anyhow::Result;
+    use tempfile::tempdir;
+
+    use super::*;
+
+    fn write_product_json(path: &Path) -> Result<()> {
+        fs::write(
+            path,
+            r#"{
+                "nameShort": "Code - OSS",
+                "nameLong": "Code - OSS",
+                "applicationName": "code-oss",
+                "dataFolderName": ".vscode-oss",
+                "quality": "stable",
+                "commit": "abc123"
+            }"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn from_path_accepts_install_directory_with_nested_product_json() -> Result<()> {
+        let dir = tempdir()?;
+        let app_dir = dir.path().join("resources").join("app");
+        fs::create_dir_all(&app_dir)?;
+        write_product_json(&app_dir.join("product.json"))?;
+
+        let editor = from_path(dir.path())?;
+
+        assert_eq!(editor.product.name_short, "Code - OSS");
+        assert_eq!(editor.product.application_name, "code-oss");
+        assert_eq!(editor.product.data_folder_name, ".vscode-oss");
+        Ok(())
+    }
+
+    #[test]
+    fn from_path_accepts_launcher_inside_install_tree() -> Result<()> {
+        let dir = tempdir()?;
+        let bin_dir = dir.path().join("bin");
+        let app_dir = dir.path().join("resources").join("app");
+        fs::create_dir_all(&bin_dir)?;
+        fs::create_dir_all(&app_dir)?;
+        let launcher = bin_dir.join("code-oss");
+        fs::write(&launcher, "")?;
+        write_product_json(&app_dir.join("product.json"))?;
+
+        let editor = from_path(&launcher)?;
+
+        assert_eq!(editor.product.name_short, "Code - OSS");
+        assert_eq!(editor.launcher, launcher);
+        Ok(())
+    }
+
+    #[test]
+    fn product_in_dir_prefers_direct_product_json() -> Result<()> {
+        let dir = tempdir()?;
+        let direct = dir.path().join("product.json");
+        write_product_json(&direct)?;
+
+        assert_eq!(product_in_dir(dir.path()), Some(direct));
+        Ok(())
+    }
+}

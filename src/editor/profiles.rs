@@ -208,3 +208,129 @@ fn generate_location(name: &str, existing: &[StoredProfile]) -> String {
     // Practically unreachable; fall back to a timestamp-derived id.
     format!("{nanos:08x}")
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use anyhow::Result;
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::editor::product::Product;
+
+    fn editor(user_dir: &Path, extensions_dir: &Path) -> Editor {
+        Editor {
+            product: Product {
+                name_short: "VSCodium".to_owned(),
+                name_long: "VSCodium".to_owned(),
+                application_name: "codium".to_owned(),
+                data_folder_name: ".vscode-oss".to_owned(),
+                quality: Some("stable".to_owned()),
+                commit: Some("abc123".to_owned()),
+            },
+            launcher: PathBuf::from("codium"),
+            user_dir: user_dir.to_path_buf(),
+            extensions_dir: extensions_dir.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn read_all_includes_default_and_named_profiles() -> Result<()> {
+        let dir = tempdir()?;
+        let user_dir = dir.path().join("User");
+        let storage_dir = user_dir.join("globalStorage");
+        fs::create_dir_all(&storage_dir)?;
+        fs::write(
+            storage_dir.join("storage.json"),
+            r#"{
+                "unrelated": true,
+                "userDataProfiles": [
+                    {
+                        "location": "-72fdf191",
+                        "name": "Rust",
+                        "icon": "package",
+                        "useDefaultFlags": { "keybindings": true }
+                    }
+                ]
+            }"#,
+        )?;
+        let editor = editor(&user_dir, &dir.path().join("extensions"));
+
+        let profiles = read_all(&editor)?;
+
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles.first().map(|p| p.name.as_str()), Some("Default"));
+        assert_eq!(profiles.get(1).map(|p| p.name.as_str()), Some("Rust"));
+        assert_eq!(
+            profiles
+                .get(1)
+                .and_then(|p| p.use_default.get("keybindings"))
+                .copied(),
+            Some(true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn read_stored_accepts_stringified_profile_array() -> Result<()> {
+        let dir = tempdir()?;
+        let user_dir = dir.path().join("User");
+        let storage_dir = user_dir.join("globalStorage");
+        fs::create_dir_all(&storage_dir)?;
+        fs::write(
+            storage_dir.join("storage.json"),
+            r#"{
+                "userDataProfiles": "[{\"location\":\"abc123\",\"name\":\"Web\"}]"
+            }"#,
+        )?;
+        let editor = editor(&user_dir, &dir.path().join("extensions"));
+
+        let stored = read_stored(&editor)?;
+
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored.first().map(|p| p.name.as_str()), Some("Web"));
+        assert_eq!(stored.first().map(|p| p.location.as_str()), Some("abc123"));
+        Ok(())
+    }
+
+    #[test]
+    fn profile_paths_respect_default_vs_named_storage_locations() -> Result<()> {
+        let dir = tempdir()?;
+        let user_dir = dir.path().join("User");
+        let extensions_dir = dir.path().join("extensions");
+        let editor = editor(&user_dir, &extensions_dir);
+        let default = Profile::default_profile();
+        let named = Profile {
+            name: "Rust".to_owned(),
+            location: Some("-72fdf191".to_owned()),
+            icon: None,
+            use_default: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            default.settings_path(&editor),
+            user_dir.join("settings.json")
+        );
+        assert_eq!(
+            default.extensions_path(&editor),
+            extensions_dir.join("extensions.json")
+        );
+        assert_eq!(
+            named.settings_path(&editor),
+            user_dir
+                .join("profiles")
+                .join("-72fdf191")
+                .join("settings.json")
+        );
+        assert_eq!(
+            named.extensions_path(&editor),
+            user_dir
+                .join("profiles")
+                .join("-72fdf191")
+                .join("extensions.json")
+        );
+        Ok(())
+    }
+}

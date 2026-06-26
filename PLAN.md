@@ -18,7 +18,10 @@ Done and verified (Code - OSS as testbench; VSCodium read-only): editor discover
 3-way `sync` with conflict resolution, the interactive flow, JSONC settings
 read/merge/write, extension install/uninstall via the editor CLI, running-editor gate,
 atomic writes, backups, and `--dry-run`. Unit tests cover config layering, null
-stripping, id normalization, TOML round-tripping, and the 3-way classify table.
+stripping, id normalization, TOML round-tripping, the 3-way classify table,
+cross-platform path derivation, fake editor install discovery via `product.json`, and
+profile registry fixtures. GitHub Actions runs fmt, clippy, and tests on Linux, Windows,
+and macOS.
 
 Deviations from the design below, kept deliberately simple for the MVP:
 
@@ -72,10 +75,11 @@ Near-term polish:
 - **Deep object merge** for settings layering (today: per-top-level-key replace, §2.3).
 
 Cross-platform & quality:
-- **Testing & CI** (below) — fixture-based engine tests on Linux/Windows/macOS plus an
-  optional real-editor smoke job.
+- **Broader fixture tests + real-editor smoke** (below) — initial GitHub Actions and
+  fixture tests are in place; still expand engine fixtures and add an optional
+  real-editor smoke job.
 - **Data-driven `editor/paths.rs`** — inject platform + env instead of `cfg!`, so the
-  Windows/macOS path rules are unit-testable on a single Linux runner.
+  Windows/macOS path rules are unit-testable on a single Linux runner. ✅
 - **More editors** — the `product.json` layer makes new forks mostly free; verify VS Code
   and Cursor when available.
 
@@ -113,9 +117,11 @@ it can be tested **without a real editor**: build fixture install trees
 tool at them via env (`$HOME` / `$APPDATA` / `$XDG_CONFIG_HOME`) and the
 `user_dir`/`extensions_dir` overrides (already exercised with scratch dirs).
 
-- **CI:** GitHub Actions with `matrix.os: [ubuntu, windows, macos]` for the fixture-based
-  engine tests — free for public repos. Alternatives: Azure Pipelines (best free tier for
-  private OSS), Cirrus CI (good real macOS), AppVeyor (Windows).
+- **CI:** GitHub Actions runs formatting, clippy with warnings denied, and tests with
+  `matrix.os: [ubuntu-latest, windows-latest, macos-latest]`.
+- **Current fixture coverage:** data-driven path derivation for Linux/macOS/Windows,
+  fake install-tree discovery through `product.json`, and fake `storage.json` profile
+  registries including stringified `userDataProfiles`.
 - **Real-editor smoke job** (separate / nightly / `workflow_dispatch`): install editors
   per OS — VSCodium via `choco`/`brew`, VS Code via `choco`/`brew`/`winget`, Cursor
   optional — and exercise the two parts that need a real binary: editor-CLI extension

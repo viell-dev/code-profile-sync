@@ -53,3 +53,6 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.150", features = ["preserve_order"] }
 sysinfo = "0.39.5"
 toml = "1.1.2"
+
+[dev-dependencies]
+tempfile = "3.23.0"

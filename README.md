@@ -104,3 +104,10 @@ cargo clippy --all-targets
 ```
 
 Requires the Rust toolchain pinned in `rust-toolchain.toml`.
+
+## Testing
+
+CI runs formatting, clippy with warnings denied, and unit tests on Ubuntu, Windows, and
+macOS. The current fixture tests cover cross-platform editor paths, fake
+`product.json` install discovery, and fake profile registries without requiring a real
+editor installation.
