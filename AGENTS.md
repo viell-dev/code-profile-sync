@@ -21,13 +21,16 @@ cargo build
 cargo clippy --all-targets
 cargo fmt
 cargo test
+just check
 gh workflow run vscodium-smoke.yml  # optional manual real-editor smoke
 ```
 
 Toolchain is pinned in `rust-toolchain.toml` (don't bump without reason). Normal PR CI is
 fmt + clippy + tests on Linux/Windows/macOS. The VSCodium smoke workflow is manual only:
 it installs VSCodium stable on Ubuntu and exercises the real editor CLI extension-install
-fallback against temp editor dirs.
+fallback against temp editor dirs. `just` recipes wrap common local dev commands; the
+editor-facing recipes default to Code - OSS and keep generated configs/snapshots/vendor
+files under `run/`.
 
 ## Code style — non-negotiable
 

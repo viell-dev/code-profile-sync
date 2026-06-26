@@ -1,6 +1,7 @@
 /target
 
 # Local run artifacts when testing the tool from within this repo.
+/run/
 /.code-profile-sync/
 /code-oss.toml
 /codium.toml

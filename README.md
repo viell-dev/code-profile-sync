@@ -105,6 +105,18 @@ cargo clippy --all-targets
 
 Requires the Rust toolchain pinned in `rust-toolchain.toml`.
 
+The repo also has a `justfile` for common development commands:
+
+```sh
+just check
+just dev status
+just init
+just sync Rust
+```
+
+The `dev`/`init`/`status`/`push`/`pull`/`sync` recipes default to **Code - OSS** and
+store local run artifacts under `run/`.
+
 ## Testing
 
 CI runs formatting, clippy with warnings denied, and unit tests on Ubuntu, Windows, and
