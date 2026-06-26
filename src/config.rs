@@ -12,6 +12,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::editor::profiles::DEFAULT_PROFILE;
+
 /// Top-level config document.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -19,7 +21,25 @@ pub struct Config {
     pub editor: EditorRef,
     pub global: Layer,
     pub groups: BTreeMap<String, Layer>,
+    /// The built-in Default profile (always present; cannot be renamed).
+    pub default: DefaultProfile,
+    /// Named (non-default) profiles.
     pub profiles: BTreeMap<String, ProfileConfig>,
+}
+
+/// The built-in Default profile. Unlike named profiles it has no icon and no
+/// `use_default` inheritance flags (it is the profile others inherit *from*).
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DefaultProfile {
+    /// Names of groups this profile includes.
+    pub groups: Vec<String>,
+    /// Profile-specific settings (highest precedence).
+    pub settings: BTreeMap<String, Value>,
+    /// Profile-specific extensions.
+    pub extensions: Vec<String>,
+    /// Extension IDs to drop even if a group/global adds them.
+    pub exclude_extensions: Vec<String>,
 }
 
 /// How the config refers to / overrides the target editor.
@@ -85,6 +105,11 @@ impl Config {
             fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let config: Self =
             toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+        if config.profiles.contains_key(DEFAULT_PROFILE) {
+            anyhow::bail!(
+                "the Default profile is configured under [default], not [profiles.{DEFAULT_PROFILE}]"
+            );
+        }
         Ok(config)
     }
 
@@ -103,22 +128,57 @@ impl Config {
         for group in clone.groups.values_mut() {
             group.settings = sanitize_settings(&group.settings);
         }
+        clone.default.settings = sanitize_settings(&clone.default.settings);
         for profile in clone.profiles.values_mut() {
             profile.settings = sanitize_settings(&profile.settings);
         }
         clone
     }
 
-    /// Effective desired state per profile (keyed by profile name).
+    /// Effective desired state per profile (keyed by profile name), including the
+    /// built-in Default profile.
     pub fn resolve(&self) -> BTreeMap<String, Resolved> {
         let mut out = BTreeMap::new();
+        out.insert(DEFAULT_PROFILE.to_owned(), self.resolve_default());
         for (name, profile) in &self.profiles {
             out.insert(name.clone(), self.resolve_profile(profile));
         }
         out
     }
 
+    fn resolve_default(&self) -> Resolved {
+        self.resolve_layers(
+            &self.default.groups,
+            &self.default.settings,
+            &self.default.extensions,
+            &self.default.exclude_extensions,
+            None,
+            &BTreeMap::new(),
+        )
+    }
+
     fn resolve_profile(&self, profile: &ProfileConfig) -> Resolved {
+        self.resolve_layers(
+            &profile.groups,
+            &profile.settings,
+            &profile.extensions,
+            &profile.exclude_extensions,
+            profile.icon.as_deref(),
+            &profile.use_default,
+        )
+    }
+
+    /// Layer global + the named groups + profile-level fields into the effective
+    /// desired state.
+    fn resolve_layers(
+        &self,
+        groups: &[String],
+        own_settings: &BTreeMap<String, Value>,
+        own_extensions: &[String],
+        excludes: &[String],
+        icon: Option<&str>,
+        use_default: &BTreeMap<String, bool>,
+    ) -> Resolved {
         let mut settings = self.global.settings.clone();
         let mut extensions: BTreeSet<String> = self
             .global
@@ -127,7 +187,7 @@ impl Config {
             .map(|id| normalize_id(id))
             .collect();
 
-        for group_name in &profile.groups {
+        for group_name in groups {
             if let Some(group) = self.groups.get(group_name) {
                 for (key, value) in &group.settings {
                     settings.insert(key.clone(), value.clone());
@@ -136,19 +196,19 @@ impl Config {
             }
         }
 
-        for (key, value) in &profile.settings {
+        for (key, value) in own_settings {
             settings.insert(key.clone(), value.clone());
         }
-        extensions.extend(profile.extensions.iter().map(|id| normalize_id(id)));
-        for excluded in &profile.exclude_extensions {
+        extensions.extend(own_extensions.iter().map(|id| normalize_id(id)));
+        for excluded in excludes {
             extensions.remove(&normalize_id(excluded));
         }
 
         Resolved {
             settings,
             extensions,
-            icon: profile.icon.clone(),
-            use_default: profile.use_default.clone(),
+            icon: icon.map(ToOwned::to_owned),
+            use_default: use_default.clone(),
         }
     }
 }

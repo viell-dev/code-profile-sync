@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::cli::Prefer;
-use crate::config::{Config, ProfileConfig, Resolved};
+use crate::config::{Config, DefaultProfile, ProfileConfig, Resolved};
 use crate::editor::Editor;
 use crate::editor::profiles::{self, Profile};
 use crate::extension::Catalog;
@@ -165,19 +165,29 @@ fn capture_profile(
     extensions: &BTreeSet<String>,
 ) {
     let base = baseline(config, name);
-    let entry = config.profiles.entry(name.to_owned()).or_default();
-
-    entry.settings = settings
+    let settings_delta: BTreeMap<String, Value> = settings
         .iter()
         .filter(|(k, v)| base.settings.get(*k) != Some(*v))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    entry.extensions = extensions.difference(&base.extensions).cloned().collect();
-    entry.exclude_extensions = base.extensions.difference(extensions).cloned().collect();
-    if editor_profile.icon.is_some() {
-        entry.icon.clone_from(&editor_profile.icon);
+    let ext_add: Vec<String> = extensions.difference(&base.extensions).cloned().collect();
+    let ext_excl: Vec<String> = base.extensions.difference(extensions).cloned().collect();
+
+    if name == profiles::DEFAULT_PROFILE {
+        let d = &mut config.default;
+        d.settings = settings_delta;
+        d.extensions = ext_add;
+        d.exclude_extensions = ext_excl;
+    } else {
+        let entry = config.profiles.entry(name.to_owned()).or_default();
+        entry.settings = settings_delta;
+        entry.extensions = ext_add;
+        entry.exclude_extensions = ext_excl;
+        if editor_profile.icon.is_some() {
+            entry.icon.clone_from(&editor_profile.icon);
+        }
+        entry.use_default.clone_from(&editor_profile.use_default);
     }
-    entry.use_default.clone_from(&editor_profile.use_default);
 
     snapshot.profiles.insert(
         name.to_owned(),
@@ -191,19 +201,26 @@ fn capture_profile(
 /// The desired state of a profile from base layers only (global + its groups),
 /// excluding profile-level settings/extensions.
 fn baseline(config: &Config, name: &str) -> Resolved {
-    let groups = config
-        .profiles
-        .get(name)
-        .map(|p| p.groups.clone())
-        .unwrap_or_default();
-    let probe = ProfileConfig {
-        groups,
-        ..ProfileConfig::default()
-    };
-    let mut probe_config = config.clone();
-    probe_config.profiles.clear();
-    probe_config.profiles.insert(name.to_owned(), probe);
-    probe_config.resolve().remove(name).unwrap_or_default()
+    let mut probe = config.clone();
+    probe.profiles.clear();
+    probe.default = DefaultProfile::default();
+    if name == profiles::DEFAULT_PROFILE {
+        probe.default.groups.clone_from(&config.default.groups);
+    } else {
+        let groups = config
+            .profiles
+            .get(name)
+            .map(|p| p.groups.clone())
+            .unwrap_or_default();
+        probe.profiles.insert(
+            name.to_owned(),
+            ProfileConfig {
+                groups,
+                ..ProfileConfig::default()
+            },
+        );
+    }
+    probe.resolve().remove(name).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
