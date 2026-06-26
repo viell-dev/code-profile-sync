@@ -1,9 +1,8 @@
-# Code Profile Sync — Plan
+# Code Profile Manager — Plan
 
-A CLI (GUI later) that keeps profiles in a VS Code OSS–based editor in sync with a
-declarative TOML config held in this repo. It can push the config into the editor,
-pull editor state back into the config, and reconcile both directions with conflict
-resolution.
+A CLI (GUI later) that manages profiles in a VS Code OSS–based editor from declarative
+TOML config. It can push the config into the editor, pull editor state back into the
+config, and reconcile both directions with conflict resolution.
 
 v1 scope: **settings + extensions**, **VSCodium first** (with per-editor config and a
 multi-editor design), **hybrid extension writes**, **TOML config**. Keybindings,
@@ -19,8 +18,9 @@ Done and verified (Code - OSS as testbench; VSCodium read-only): editor discover
 read/merge/write, extension install/uninstall via the editor CLI, running-editor gate,
 atomic writes, backups, and `--dry-run`. Unit tests cover config layering, null
 stripping, id normalization, TOML round-tripping, the 3-way classify table,
-cross-platform path derivation, fake editor install discovery via `product.json`, and
-profile registry fixtures. Engine fixture tests exercise `push`, `pull`, and `sync`
+cross-platform path derivation, app-home derivation, alias normalization, fake editor
+install discovery via `product.json`, and profile registry fixtures. Engine fixture
+tests exercise `push`, `pull`, and `sync`
 against fake `User/` and extensions directories. GitHub Actions runs fmt, clippy, and
 tests on Linux, Windows, and macOS; a separate manual VSCodium smoke workflow exercises
 the real editor CLI extension-install fallback on Ubuntu.
@@ -40,11 +40,18 @@ Deviations from the design below, kept deliberately simple for the MVP:
   **Default** profile is refused (its list is the shared pool). Failed installs are
   reported and skipped, never aborting the run.
 - **Local (VSIX-source) extensions are vendored** — on pull/sync, extensions whose pool
-  entry has `metadata.source == "vsix"` are copied into `<config_dir>/vendor/extensions/`
-  (folder + a sidecar of the catalog entry) so the config is portable. On push they are
-  restored from there onto machines that don't have them installed (the path is rewritten
-  to the local pool). Verified by vendoring from VSCodium and restoring onto a fresh
-  extensions directory.
+  entry has `metadata.source == "vsix"` are copied into the app home's
+  `vendor/extensions/` (folder + a sidecar of the catalog entry) so the config is
+  portable. With explicit `--config` and no `--app-dir`, vendored extensions live under
+  `.code-pm/vendor/extensions/` next to that config. On push they are restored from
+  there onto machines that don't have them installed (the path is rewritten to the local
+  pool). Verified by vendoring from VSCodium and restoring onto a fresh extensions
+  directory.
+- **App home + aliases** — the default config/state location is the per-user app home;
+  `--app-dir` relocates the whole home, and `--config` remains an exact editor-config
+  override. `config.toml` stores `default_editor`, known editor aliases, and verified
+  path overrides. Editor selectors are case-insensitive, punctuation-normalized, and can
+  match product IDs, application names, discovered launcher names, or user aliases.
 - **Consolidation** (`Config::consolidate`) hoists shared config into `[global]`,
   behavior-preservingly (`resolve()` unchanged): a settings key present in *every*
   profile is hoisted using its most-common value (when shared by ≥2 profiles) with
@@ -64,7 +71,6 @@ Deviations from the design below, kept deliberately simple for the MVP:
 ## Remaining work / roadmap
 
 Near-term polish:
-- **Config & state storage location** — adopt a per-user app dir as the default (below).
 - **JSON Schema + `docs/config.md`** — `schemars`-derived schema (§2.1) and a standalone
   config reference; today generated configs carry only a comment header.
 - **Resources beyond settings + extensions** — keybindings, snippets, tasks, MCP
@@ -96,19 +102,40 @@ Larger:
 
 ## Config & state storage location
 
-Today: the config defaults to `<applicationName>.toml` in the **current working
-directory**; the 3-way snapshot and backups live under `.code-profile-sync/` next to it,
-and vendored extensions under `vendor/extensions/` next to it. `--config <path>`
-overrides the config location.
+Default: a per-user application directory —
 
-Planned default: a per-user application directory, with `--config` still overriding —
-- Linux: `$XDG_CONFIG_HOME/code-profile-sync/` (fallback `~/.config/code-profile-sync/`)
-- macOS: `~/Library/Application Support/code-profile-sync/`
-- Windows: `%APPDATA%\code-profile-sync\`
+- Linux: `$XDG_CONFIG_HOME/code-profile-manager/` (fallback
+  `~/.config/code-profile-manager/`)
+- macOS: `~/Library/Application Support/code-profile-manager/`
+- Windows: `%LOCALAPPDATA%\code-profile-manager\`
 
-holding the per-editor configs (e.g. `vscodium.toml`), their snapshots, and vendored
-extensions. This gives the tool — and especially a future **GUI** — a stable,
-discoverable home instead of depending on the working directory.
+Layout:
+
+```text
+config.toml              # app preferences, default editor, known aliases/paths
+editors/
+  vscodium.toml          # per-editor managed profile state
+snapshots/
+  vscodium.snapshot.json
+backups/
+  <timestamp>/
+vendor/
+  extensions/
+```
+
+`--app-dir <dir>` relocates the whole app home, useful for sandboxes, remote-mounted
+systems, or managed/shared profile baselines. `--config <path>` remains an exact
+editor-config override. With `--config` alone, derived state stays next to that config:
+
+```text
+.code-pm/
+  snapshots/<editor>.snapshot.json
+  backups/<timestamp>/
+  vendor/extensions/
+```
+
+With `--config` and `--app-dir`, the explicit config is used but state goes under the
+supplied app home.
 
 ## Testing & CI
 
@@ -116,7 +143,7 @@ Most of the cross-platform surface (discovery, `product.json` parsing, path deri
 config layering/consolidation, the sync engine) is pure logic over files + env vars, so
 it can be tested **without a real editor**: build fixture install trees
 (`…/resources/app/product.json`) and fake `User/` + extensions directories, and point the
-tool at them via env (`$HOME` / `$APPDATA` / `$XDG_CONFIG_HOME`) and the
+tool at them via env (`$HOME` / `$APPDATA` / `$LOCALAPPDATA` / `$XDG_CONFIG_HOME`) and the
 `user_dir`/`extensions_dir` overrides (already exercised with scratch dirs).
 
 - **CI:** GitHub Actions runs formatting, clippy with warnings denied, and tests with
@@ -347,7 +374,7 @@ keys = `ProfileResourceType` (§1.4); extension IDs →
 ### 2.2 Sketch
 
 ```toml
-# code-profile-sync config. See README.md for the format.
+# code-profile-manager editor config. See README.md for the format.
 
 [editor]
 # Match a discovered editor (§0) by product.json nameShort or applicationName.
@@ -445,7 +472,7 @@ a pulled value shadows a group/global value so the user can refactor upward by h
 
 ### 3.3 Directions / commands
 
-The bare invocation (`code-profile-sync` with no subcommand) launches the **interactive
+The bare invocation (`code-profile-manager` with no subcommand) launches the **interactive
 flow** (§3.5) — the intended default for v1. Each action is also a direct subcommand for
 scripting / non-interactive use:
 
@@ -460,9 +487,9 @@ scripting / non-interactive use:
 - `init` — scaffold a config by importing the current editor state (an honest first
   snapshot, so the repo starts converged).
 
-Common flags: `--editor <name>`, `--config <path>`, `--profile <name>` (limit scope),
-`--dry-run`, `--yes`, `--prefer editor|repo`, `--force` (override safety checks),
-`--non-interactive` (never prompt; for scripts/CI).
+Common flags: `--editor <name>`, `--config <path>`, `--app-dir <path>`, `--profile
+<name>` (limit scope), `--dry-run`, `--yes`, `--prefer editor|repo`, `--force`
+(override safety checks), `--non-interactive` (never prompt; for scripts/CI).
 
 ### 3.4 Safety
 

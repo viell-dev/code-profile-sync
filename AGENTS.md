@@ -1,13 +1,13 @@
 # AGENTS.md
 
-Agent guide for the **Code Profile Sync** repo. The design and current status live in
+Agent guide for the **Code Profile Manager** repo. The design and current status live in
 [`PLAN.md`](./PLAN.md) — read it before non-trivial work and keep it in sync when the
 design changes. This file only covers how to work in the repo and the things that will
 bite you; it links to PLAN.md rather than restating it.
 
 ## What this is
 
-A Rust CLI (GUI later) that syncs **settings + extensions** across the profiles of a
+A Rust CLI (GUI later) that manages **settings + extensions** across the profiles of a
 VS Code OSS–based editor against a declarative TOML config. Editors are **discovered by
 binary and identified via `product.json`**, not by config directory — see
 [PLAN.md §0](./PLAN.md). Test targets are **Code - OSS** and **VSCodium** (both on the
@@ -17,11 +17,11 @@ left, see the "Implementation status" and "Remaining work / roadmap" sections of
 ## Build / check
 
 ```sh
-cargo build
-cargo clippy --all-targets
-cargo fmt
-cargo test
 just check
+just build
+just test
+just fmt
+just clippy
 gh workflow run vscodium-smoke.yml  # optional manual real-editor smoke
 ```
 
@@ -30,7 +30,10 @@ fmt + clippy + tests on Linux/Windows/macOS. The VSCodium smoke workflow is manu
 it installs VSCodium stable on Ubuntu and exercises the real editor CLI extension-install
 fallback against temp editor dirs. `just` recipes wrap common local dev commands; the
 editor-facing recipes default to Code - OSS and keep generated configs/snapshots/vendor
-files under `run/`.
+files under `run/`. Prefer the `just` recipe when one exists instead of running the
+underlying `cargo` command directly. If a recipe is stale or broken, fix the `justfile`
+as part of the task rather than bypassing it, so local workflow and CI assumptions stay
+in sync over time.
 
 ## Code style — non-negotiable
 

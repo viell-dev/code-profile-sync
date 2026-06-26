@@ -117,7 +117,7 @@ impl Config {
     pub fn to_toml(&self) -> Result<String> {
         let body = toml::to_string_pretty(&self.sanitized()).context("serializing config")?;
         Ok(format!(
-            "# code-profile-sync config. See README.md for the format.\n\n{body}"
+            "# code-profile-manager editor config. See README.md for the format.\n\n{body}"
         ))
     }
 

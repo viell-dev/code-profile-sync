@@ -1,13 +1,12 @@
 //! The last-synced state snapshot, used as the common ancestor for 3-way sync.
 //!
-//! Stored next to the config in `.code-profile-sync/<editor>.snapshot.json`, the
-//! snapshot records the fully-resolved per-profile settings and extension set as
-//! of the last successful sync, so we can tell config-side from editor-side
+//! The snapshot records the fully-resolved per-profile settings and extension set
+//! as of the last successful sync, so we can tell config-side from editor-side
 //! changes instead of guessing.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -53,14 +52,4 @@ impl Snapshot {
     pub fn profile(&self, name: &str) -> Option<&ProfileSnapshot> {
         self.profiles.get(name)
     }
-}
-
-/// Default snapshot path for a config file and editor id.
-pub fn path_for(config_path: &Path, editor_id: &str) -> PathBuf {
-    let dir = config_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(".code-profile-sync");
-    let safe = editor_id.replace([' ', '/', '\\'], "-");
-    dir.join(format!("{safe}.snapshot.json"))
 }

@@ -1,10 +1,9 @@
-# Code Profile Sync
+# Code Profile Manager
 
-A CLI for keeping profiles in a **VS Code OSS–based editor** (VSCodium, VS Code, Cursor)
-in sync with a declarative **TOML** config kept in version control. Define settings and
-extensions once — globally, in reusable groups, and per profile — then push them into
-the editor, pull editor changes back, or reconcile both directions with conflict
-resolution.
+A CLI for managing profiles in a **VS Code OSS–based editor** (VSCodium, VS Code,
+Cursor) from declarative **TOML** config. Define settings and extensions once —
+globally, in reusable groups, and per profile — then push them into the editor, pull
+editor changes back, or reconcile both directions with conflict resolution.
 
 > Status: working MVP (settings + extensions). See [`PLAN.md`](./PLAN.md) for the full
 > design and what's still deferred.
@@ -14,12 +13,15 @@ resolution.
 I run one profile per language/framework (plus separate profiles for work projects).
 Some extensions and settings are common to all profiles, some to most. This tool keeps
 them consistent without hand-editing each profile, while respecting VS Code's "use
-default" inheritance (e.g. profiles that share the default keybindings).
+default" inheritance (e.g. profiles that share the default keybindings). The storage
+layout is intended to support both local use and managed app-home directories for
+sandboxes, remote systems, or shared profile baselines.
 
 ## v1 scope
 
 - **Editors:** discovered by binary + `product.json` (handles forks generically); tested
-  against **Code - OSS** and **VSCodium**. Per-editor config; `--editor` selects one.
+  against **Code - OSS** and **VSCodium**. Per-editor config; `--editor` selects one by
+  product name, application name, generated alias, or user alias.
 - **Resources:** settings + extensions.
 - **Config:** TOML — `[global]`, reusable `[groups.*]`, the built-in `[default]` profile,
   and named `[profiles.*]`. The interactive flow (and `init`) can **consolidate** settings
@@ -30,9 +32,12 @@ default" inheritance (e.g. profiles that share the default keybindings).
   also a direct subcommand (`status`/`pull`/`push`/`sync`) for scripting.
 - **Sync:** 3-way with per-item conflict resolution (keep editor / keep repo). You're
   prompted to close the editor before any write.
+- **App home:** default state lives under the platform app config directory, with
+  `--app-dir` for sandboxes/remote-mounted homes and `--config` for an exact editor
+  config override.
 - **Extensions:** adds are tiered — shared pool → vendored copy → editor CLI (no
   marketplace lookups of our own). Local **VSIX-source** extensions are vendored into
-  `<config_dir>/vendor/extensions/` on pull/sync and restored from there on push, so a
+  the app home on pull/sync and restored from there on push, so a
   config is portable even for extensions that aren't on any marketplace. IDs enter a
   config by hand or via `pull`.
 - **Interactive extras:** the menu can consolidate shared settings/extensions into
@@ -42,35 +47,64 @@ default" inheritance (e.g. profiles that share the default keybindings).
 
 ```sh
 # Discover installed editors
-code-profile-sync detect
+code-profile-manager detect
 
 # Inspect a selected editor's profiles (read-only)
-code-profile-sync --editor VSCodium list-profiles
+code-profile-manager --editor vscodium list-profiles
 
 # Create a config from an editor's current profiles
-code-profile-sync --editor "Code - OSS" init
+code-profile-manager --editor "Code - OSS" init
 
 # See what would change, then apply
-code-profile-sync --editor "Code - OSS" status
-code-profile-sync --editor "Code - OSS" --dry-run push
-code-profile-sync --editor "Code - OSS" push
+code-profile-manager --editor code-oss status
+code-profile-manager --editor code-oss --dry-run push
+code-profile-manager --editor code-oss push
 
 # Reconcile both directions (prompts on conflict; or --prefer editor|repo)
-code-profile-sync --editor "Code - OSS" sync
+code-profile-manager --editor code-oss sync
 
 # No subcommand → interactive wizard + menu
-code-profile-sync
+code-profile-manager
 ```
 
-Selectors match an editor's `nameShort` or `applicationName` (e.g. `VSCodium`,
-`"Code - OSS"`, `code-oss`). `--profile <name>` limits an operation to one profile.
+`code-pm` is installed as the shorthand binary.
 
-**Where files live.** By default the config is `<applicationName>.toml` in the current
-directory (e.g. `vscodium.toml`); the 3-way sync snapshot and backups go under
-`.code-profile-sync/`, and vendored extensions under `vendor/extensions/`, both next to
-the config. Use `--config <path>` to put the config elsewhere. (A future version will
-default to a per-user app directory such as `$XDG_CONFIG_HOME/code-profile-sync/` instead
-of the working directory — see [`PLAN.md`](./PLAN.md).)
+Selectors are case-insensitive and normalize punctuation, so `VSCodium`, `vscodium`,
+`codium`, `Code - OSS`, `code-oss`, and `codeoss` all work when they identify a
+discovered editor. Launcher names such as `code` are aliases only for the product they
+actually resolve to on the current machine. `--profile <name>` limits an operation to
+one profile.
+
+**Where files live.** By default, application files live under:
+
+```text
+Linux:   $XDG_CONFIG_HOME/code-profile-manager/
+         fallback ~/.config/code-profile-manager/
+macOS:   ~/Library/Application Support/code-profile-manager/
+Windows: %LOCALAPPDATA%\code-profile-manager\
+```
+
+The default layout is:
+
+```text
+config.toml
+editors/<editor>.toml
+snapshots/<editor>.snapshot.json
+backups/<timestamp>/
+vendor/extensions/
+```
+
+`config.toml` stores app preferences such as `default_editor` and known editor aliases.
+The per-editor TOML files under `editors/` hold managed profile state. Use
+`--app-dir <dir>` to move the whole app home, or `--config <path>` to operate on one
+specific editor config. With `--config` alone, derived state stays next to that config:
+
+```text
+.code-pm/
+  snapshots/<editor>.snapshot.json
+  backups/<timestamp>/
+  vendor/extensions/
+```
 
 ### Behavior notes
 
@@ -85,7 +119,7 @@ of the working directory — see [`PLAN.md`](./PLAN.md).)
 
 The editor **must be closed** while writing — it owns these files and will overwrite
 changes on exit. Mutating commands detect a running editor and refuse without
-`--force`, write atomically, take backups (under `.code-profile-sync/backups/`), and
+`--force`, write atomically, take backups, and
 support `--dry-run`.
 
 ## Roadmap
@@ -93,12 +127,12 @@ support `--dry-run`.
 Working today: settings + extensions, across the built-in Default and named profiles,
 with consolidation and VSIX vendoring. Planned (see [`PLAN.md`](./PLAN.md) for detail):
 keybindings / snippets / tasks / MCP, a destructive `--prune` push, schema-assisted
-config editing, a per-user default config directory, and a GUI over the same engine.
+config editing, and a GUI over the same engine.
 
 ## Building
 
 ```sh
-cargo build      # binary at target/debug/code-profile-sync
+cargo build      # binaries at target/debug/code-profile-manager and target/debug/code-pm
 cargo test       # unit tests
 cargo clippy --all-targets
 ```

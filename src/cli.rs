@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
-#[command(name = "code-profile-sync", version, about, long_about = None)]
+#[command(name = "code-profile-manager", version, about, long_about = None)]
 pub struct Cli {
     #[command(flatten)]
     pub global: GlobalArgs,
@@ -25,6 +25,10 @@ pub struct GlobalArgs {
     /// Path to the config file (defaults to one derived from the editor name).
     #[arg(long, short, global = true)]
     pub config: Option<PathBuf>,
+
+    /// Application state directory (defaults to the platform app config dir).
+    #[arg(long = "app-dir", global = true)]
+    pub app_dir: Option<PathBuf>,
 
     /// Limit the operation to a single profile by name.
     #[arg(long, short, global = true)]

@@ -1,9 +1,14 @@
 [package]
-name = "code-profile-sync"
+name = "code-profile-manager"
 version = "0.1.0"
 edition = "2024"
-description = "Sync settings and extensions across profiles of a VS Code OSS-based editor from a declarative TOML config."
+description = "Manage settings and extensions across profiles of a VS Code OSS-based editor."
 publish = false
+default-run = "code-profile-manager"
+
+[[bin]]
+name = "code-pm"
+path = "src/bin/code-pm.rs"
 
 [lints.rust]
 future_incompatible = { level = "warn", priority = -1 }

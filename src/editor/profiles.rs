@@ -231,6 +231,7 @@ mod tests {
                 commit: Some("abc123".to_owned()),
             },
             launcher: PathBuf::from("codium"),
+            launcher_aliases: vec!["codium".to_owned()],
             user_dir: user_dir.to_path_buf(),
             extensions_dir: extensions_dir.to_path_buf(),
         }

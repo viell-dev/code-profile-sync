@@ -722,6 +722,7 @@ mod tests {
                     commit: Some("abc123".to_owned()),
                 },
                 launcher: PathBuf::from("codium"),
+                launcher_aliases: vec!["codium".to_owned()],
                 user_dir,
                 extensions_dir,
             };

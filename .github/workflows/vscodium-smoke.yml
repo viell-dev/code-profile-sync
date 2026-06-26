@@ -31,8 +31,8 @@ jobs:
 
       - name: Push config through VSCodium CLI extension fallback
         env:
-          SMOKE_HOME: ${{ runner.temp }}/code-profile-sync-home
-          SMOKE_CONFIG: ${{ runner.temp }}/code-profile-sync-smoke/vscodium.toml
+          SMOKE_HOME: ${{ runner.temp }}/code-profile-manager-home
+          SMOKE_CONFIG: ${{ runner.temp }}/code-profile-manager-smoke/vscodium.toml
           SMOKE_WRAPPER: ${{ runner.temp }}/codium-headless
         run: |
           set -euo pipefail
@@ -58,7 +58,7 @@ jobs:
 
           HOME="$SMOKE_HOME" \
             XDG_CONFIG_HOME="$SMOKE_HOME/.config" \
-            target/debug/code-profile-sync \
+            target/debug/code-profile-manager \
               --config "$SMOKE_CONFIG" \
               --editor VSCodium \
               --non-interactive \

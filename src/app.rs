@@ -5,11 +5,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::app_config::{AppConfig, AppPaths, KnownEditor, identifiers_match, safe_id};
 use crate::cli::GlobalArgs;
 use crate::config::Config;
 use crate::editor::profiles;
 use crate::editor::{self, Editor};
-use crate::snapshot::{self, Snapshot};
+use crate::snapshot::Snapshot;
 use crate::sync::{self, Ctx};
 use crate::{safety, ui};
 
@@ -22,35 +23,35 @@ struct Session {
     snapshot_path: PathBuf,
     backup_dir: PathBuf,
     vendor_dir: PathBuf,
+    app_paths: Option<AppPaths>,
+    app_config: AppConfig,
 }
 
 impl Session {
     /// Load (or default) the config and snapshot for an editor at a config path.
-    fn open(editor: Editor, config_path: PathBuf) -> Result<Self> {
+    fn open(
+        editor: Editor,
+        config_path: PathBuf,
+        storage: StoragePaths,
+        app_paths: Option<AppPaths>,
+        app_config: AppConfig,
+    ) -> Result<Self> {
         let config = if config_path.is_file() {
             Config::load(&config_path)?
         } else {
             Config::default()
         };
-        let snapshot_path = snapshot::path_for(&config_path, editor.id());
-        let snapshot = Snapshot::load(&snapshot_path)?;
-        let config_dir = config_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
-        let backup_dir = config_dir
-            .join(".code-profile-sync")
-            .join("backups")
-            .join(safety::timestamp());
-        let vendor_dir = config_dir.join("vendor").join("extensions");
+        let snapshot = Snapshot::load(&storage.snapshot_path)?;
         Ok(Self {
             editor,
             config,
             config_path,
             snapshot,
-            snapshot_path,
-            backup_dir,
-            vendor_dir,
+            snapshot_path: storage.snapshot_path,
+            backup_dir: storage.backup_dir,
+            vendor_dir: storage.vendor_dir,
+            app_paths,
+            app_config,
         })
     }
 
@@ -95,6 +96,35 @@ impl Session {
     }
 }
 
+#[derive(Debug, Clone)]
+struct StoragePaths {
+    snapshot_path: PathBuf,
+    backup_dir: PathBuf,
+    vendor_dir: PathBuf,
+}
+
+impl StoragePaths {
+    fn for_app(app_paths: &AppPaths, editor: &Editor) -> Self {
+        Self {
+            snapshot_path: app_paths.snapshot_path(editor),
+            backup_dir: app_paths.backup_dir(),
+            vendor_dir: app_paths.vendor_dir.clone(),
+        }
+    }
+
+    fn for_config(config_path: &Path, editor: &Editor) -> Self {
+        let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+        let state_dir = config_dir.join(".code-pm");
+        Self {
+            snapshot_path: state_dir
+                .join("snapshots")
+                .join(format!("{}.snapshot.json", safe_id(editor.id()))),
+            backup_dir: state_dir.join("backups").join(safety::timestamp()),
+            vendor_dir: state_dir.join("vendor").join("extensions"),
+        }
+    }
+}
+
 /// Build an engine context borrowing only the editor field, so other session
 /// fields (config, snapshot) remain independently borrowable.
 fn make_ctx<'a>(
@@ -123,6 +153,21 @@ fn header(editor: &Editor, config_path: &Path) {
     ui::info(format!("Config: {}", config_path.display()));
 }
 
+fn save_app_config(session: &mut Session, g: &GlobalArgs) -> Result<()> {
+    let Some(app_paths) = &session.app_paths else {
+        return Ok(());
+    };
+    if session.app_config.default_editor.is_none() {
+        session.app_config.default_editor = Some(session.editor.id().to_owned());
+    }
+    session.app_config.upsert_editor(&session.editor);
+    if g.dry_run {
+        ui::info("(dry run: app config not written)");
+        return Ok(());
+    }
+    session.app_config.save(&app_paths.config)
+}
+
 // ---------------------------------------------------------------------------
 // editor / config resolution
 // ---------------------------------------------------------------------------
@@ -144,17 +189,24 @@ fn apply_overrides(mut editor: Editor, config: Option<&Config>) -> Editor {
 }
 
 /// Resolve which editor to operate on from args and an optional loaded config.
-fn resolve_editor(g: &GlobalArgs, config: Option<&Config>) -> Result<Editor> {
+fn resolve_editor(
+    g: &GlobalArgs,
+    config: Option<&Config>,
+    app_config: &AppConfig,
+) -> Result<Editor> {
     if let Some(selector) = &g.editor {
-        return editor::find(selector).with_context(|| format!("no editor matched '{selector}'"));
+        return find_editor(selector, app_config);
     }
     if let Some(cfg) = config {
         if let Some(bin) = &cfg.editor.binary {
             return editor::from_path(bin);
         }
         if let Some(name) = &cfg.editor.name {
-            return editor::find(name).with_context(|| format!("no editor matched '{name}'"));
+            return find_editor(name, app_config);
         }
+    }
+    if let Some(default) = &app_config.default_editor {
+        return find_editor(default, app_config);
     }
     let mut found = editor::discover();
     match found.len() {
@@ -166,6 +218,77 @@ fn resolve_editor(g: &GlobalArgs, config: Option<&Config>) -> Result<Editor> {
             }
             choose_editor(found)
         }
+    }
+}
+
+fn find_editor(selector: &str, app_config: &AppConfig) -> Result<Editor> {
+    let as_path = Path::new(selector);
+    if as_path.exists() {
+        return editor::from_path(as_path);
+    }
+
+    let mut matches: Vec<(Editor, Option<&KnownEditor>)> = Vec::new();
+    let discovered = editor::discover();
+    for editor in discovered {
+        let known = app_config
+            .editors
+            .iter()
+            .find(|known| known.matches(selector) && known.matches(editor.id()));
+        if editor.matches(selector) || known.is_some() {
+            matches.push((editor, known));
+        }
+    }
+
+    for known in &app_config.editors {
+        if !known.matches(selector) {
+            continue;
+        }
+        let Some(binary) = &known.binary else {
+            continue;
+        };
+        if matches
+            .iter()
+            .any(|(_, existing)| existing.is_some_and(|existing| existing.id == known.id))
+        {
+            continue;
+        }
+        let Ok(editor) = editor::from_path(binary) else {
+            continue;
+        };
+        matches.push((editor, Some(known)));
+    }
+
+    match matches.as_mut_slice() {
+        [] => anyhow::bail!("no editor matched '{selector}'"),
+        [(editor, known)] => {
+            if let Some(known) = known {
+                apply_known_overrides(editor, known);
+            }
+            Ok(editor.clone())
+        }
+        _ => {
+            let names = matches
+                .iter()
+                .map(|(editor, _)| editor.id())
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!("editor selector '{selector}' is ambiguous: {names}");
+        }
+    }
+}
+
+fn apply_known_overrides(editor: &mut Editor, known: &KnownEditor) {
+    if let Some(binary) = &known.binary
+        && let Ok(candidate) = editor::from_path(binary)
+        && identifiers_match(candidate.id(), editor.id())
+    {
+        editor.launcher.clone_from(binary);
+    }
+    if let Some(user_dir) = &known.user_dir {
+        editor.user_dir.clone_from(user_dir);
+    }
+    if let Some(extensions_dir) = &known.extensions_dir {
+        editor.extensions_dir.clone_from(extensions_dir);
     }
 }
 
@@ -181,26 +304,36 @@ fn choose_editor(found: Vec<Editor>) -> Result<Editor> {
     }
 }
 
-fn default_config_path(editor: &Editor) -> PathBuf {
-    let name = editor
-        .product
-        .application_name
-        .replace([' ', '/', '\\'], "-");
-    PathBuf::from(format!("{name}.toml"))
+fn config_path_for(g: &GlobalArgs, app_paths: &AppPaths, editor: &Editor) -> PathBuf {
+    g.config
+        .clone()
+        .unwrap_or_else(|| app_paths.editor_config_path(editor))
+}
+
+fn storage_paths_for(g: &GlobalArgs, app_paths: &AppPaths, editor: &Editor) -> StoragePaths {
+    if g.config.is_some() && g.app_dir.is_none() {
+        StoragePaths::for_config(&config_path_for(g, app_paths, editor), editor)
+    } else {
+        StoragePaths::for_app(app_paths, editor)
+    }
 }
 
 /// Build a session from global args (non-interactive editor selection).
 fn open_session(g: &GlobalArgs) -> Result<Session> {
+    let app_paths = AppPaths::resolve(g.app_dir.as_deref())?;
+    let app_config = AppConfig::load(&app_paths.config)?;
     let loaded = match &g.config {
         Some(path) if path.is_file() => Some(Config::load(path)?),
         _ => None,
     };
-    let editor = apply_overrides(resolve_editor(g, loaded.as_ref())?, loaded.as_ref());
-    let config_path = g
-        .config
-        .clone()
-        .unwrap_or_else(|| default_config_path(&editor));
-    Session::open(editor, config_path)
+    let editor = apply_overrides(
+        resolve_editor(g, loaded.as_ref(), &app_config)?,
+        loaded.as_ref(),
+    );
+    let config_path = config_path_for(g, &app_paths, &editor);
+    let storage = storage_paths_for(g, &app_paths, &editor);
+    let app_paths = (g.config.is_none() || g.app_dir.is_some()).then_some(app_paths);
+    Session::open(editor, config_path, storage, app_paths, app_config)
 }
 
 // ---------------------------------------------------------------------------
@@ -278,8 +411,9 @@ pub fn status(g: &GlobalArgs) -> Result<()> {
 
 /// Create a config from the editor's current profiles.
 pub fn init(g: &GlobalArgs) -> Result<()> {
-    let session = open_session(g)?;
+    let mut session = open_session(g)?;
     header(&session.editor, &session.config_path);
+    save_app_config(&mut session, g)?;
     if session.config_path.is_file()
         && !g.yes
         && !g.non_interactive
@@ -407,13 +541,16 @@ pub fn interactive(g: &GlobalArgs) -> Result<()> {
         anyhow::bail!("--non-interactive requires a subcommand");
     }
 
+    let app_paths = AppPaths::resolve(g.app_dir.as_deref())?;
+    let app_config = AppConfig::load(&app_paths.config)?;
+
     // 1. Select an editor (honoring --editor for the first pick).
     let editor = if let Some(selector) = &g.editor {
-        editor::find(selector).with_context(|| format!("no editor matched '{selector}'"))?
+        find_editor(selector, &app_config)?
     } else {
         pick_editor()?
     };
-    let session = prepare_session(g, editor)?;
+    let session = prepare_session(g, editor, app_paths, app_config)?;
 
     // 2. Main menu.
     menu_loop(session, g)
@@ -432,13 +569,19 @@ fn pick_editor() -> Result<Editor> {
 }
 
 /// Open a session for `editor`, offering to create a config when none exists.
-fn prepare_session(g: &GlobalArgs, editor: Editor) -> Result<Session> {
-    let config_path = g
-        .config
-        .clone()
-        .unwrap_or_else(|| default_config_path(&editor));
-    let mut session = Session::open(apply_overrides(editor, None), config_path)?;
+fn prepare_session(
+    g: &GlobalArgs,
+    editor: Editor,
+    app_paths: AppPaths,
+    app_config: AppConfig,
+) -> Result<Session> {
+    let editor = apply_overrides(editor, None);
+    let config_path = config_path_for(g, &app_paths, &editor);
+    let storage = storage_paths_for(g, &app_paths, &editor);
+    let app_paths = (g.config.is_none() || g.app_dir.is_some()).then_some(app_paths);
+    let mut session = Session::open(editor, config_path, storage, app_paths, app_config)?;
     header(&session.editor, &session.config_path);
+    save_app_config(&mut session, g)?;
     if !session.config_path.is_file() {
         if ui::confirm(
             "No config found. Create one from the editor's current profiles?",
@@ -455,8 +598,15 @@ fn prepare_session(g: &GlobalArgs, editor: Editor) -> Result<Session> {
 fn create_config(session: Session, g: &GlobalArgs) -> Result<Session> {
     let config_path = session.config_path.clone();
     let editor = session.editor.clone();
+    let storage = StoragePaths {
+        snapshot_path: session.snapshot_path.clone(),
+        backup_dir: session.backup_dir.clone(),
+        vendor_dir: session.vendor_dir.clone(),
+    };
+    let app_paths = session.app_paths.clone();
+    let app_config = session.app_config.clone();
     run_init(session, g)?;
-    Session::open(editor, config_path)
+    Session::open(editor, config_path, storage, app_paths, app_config)
 }
 
 fn menu_loop(mut session: Session, g: &GlobalArgs) -> Result<()> {
@@ -513,7 +663,13 @@ fn menu_loop(mut session: Session, g: &GlobalArgs) -> Result<()> {
                 session.save_config(g.dry_run)?;
             }
             4 => {
-                session = prepare_session(g, pick_editor()?)?;
+                let app_paths = if let Some(app_paths) = session.app_paths.clone() {
+                    app_paths
+                } else {
+                    AppPaths::resolve(g.app_dir.as_deref())?
+                };
+                session =
+                    prepare_session(g, pick_editor()?, app_paths, session.app_config.clone())?;
             }
             _ => return Ok(()),
         }

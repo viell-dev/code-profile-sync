@@ -44,13 +44,21 @@ pub fn discover() -> Vec<Editor> {
         let Ok(product) = Product::from_file(&product_path) else {
             continue;
         };
-        let Ok(editor) = Editor::new(product, launcher) else {
+        let Ok(editor) = Editor::new(product, launcher, vec![(*name).to_owned()]) else {
             continue;
         };
-        if !editors
-            .iter()
-            .any(|e| e.product.name_short == editor.product.name_short)
+        if let Some(existing) = editors
+            .iter_mut()
+            .find(|e| e.product.name_short == editor.product.name_short)
         {
+            if !existing
+                .launcher_aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(name))
+            {
+                existing.launcher_aliases.push((*name).to_owned());
+            }
+        } else {
             editors.push(editor);
         }
     }
@@ -78,7 +86,12 @@ pub fn from_path(input: &Path) -> anyhow::Result<Editor> {
     } else {
         which(&product.application_name).unwrap_or_else(|| PathBuf::from(&product.application_name))
     };
-    Editor::new(product, launcher)
+    let launcher_aliases = launcher
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| vec![name.to_owned()])
+        .unwrap_or_default();
+    Editor::new(product, launcher, launcher_aliases)
 }
 
 /// Locate the first existing executable named `name` on `PATH`.
