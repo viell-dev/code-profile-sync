@@ -20,8 +20,12 @@ pub struct Ctx<'a> {
     pub editor: &'a Editor,
     pub dry_run: bool,
     pub non_interactive: bool,
+    /// Skip the destructive-change confirmation (from `--yes`).
+    pub assume_yes: bool,
     pub prefer: Option<Prefer>,
-    pub profile_filter: Option<String>,
+    /// Profiles to limit the run to (empty = all). A non-empty filter scopes the
+    /// run to overlay mode.
+    pub profile_filter: Vec<String>,
     pub backup_dir: PathBuf,
     /// Directory where local (VSIX-source) extensions are vendored for portability.
     pub vendor_dir: PathBuf,
@@ -29,9 +33,23 @@ pub struct Ctx<'a> {
 
 impl Ctx<'_> {
     fn wants(&self, name: &str) -> bool {
-        self.profile_filter
-            .as_deref()
-            .is_none_or(|f| f.eq_ignore_ascii_case(name))
+        self.profile_filter.is_empty()
+            || self
+                .profile_filter
+                .iter()
+                .any(|f| f.eq_ignore_ascii_case(name))
+    }
+
+    /// Whether the run is scoped by `--profile` (forces overlay mode regardless of
+    /// the config's `managed` flag).
+    fn scoped(&self) -> bool {
+        !self.profile_filter.is_empty()
+    }
+
+    /// Mirror mode deletes undefined profiles; overlay mode never does. A run is
+    /// mirror only when neither `--profile` nor `[options] managed` is in effect.
+    fn mirror(&self, config: &Config) -> bool {
+        !self.scoped() && !config.options.managed
     }
 }
 
@@ -77,7 +95,12 @@ fn editor_profiles(editor: &Editor) -> Result<BTreeMap<String, Profile>> {
 pub fn status(ctx: &Ctx<'_>, config: &Config) -> Result<()> {
     let resolved = config.resolve();
     let editors = editor_profiles(ctx.editor)?;
-    let names = union_names(&resolved, &editors);
+    let deletions = config.deletions();
+    let mirror = ctx.mirror(config);
+    let mut names = union_names(&resolved, &editors);
+    names.extend(deletions.iter().cloned());
+    names.sort();
+    names.dedup();
 
     if names.is_empty() {
         ui::info("No profiles in the config or the editor.");
@@ -89,11 +112,27 @@ pub fn status(ctx: &Ctx<'_>, config: &Config) -> Result<()> {
             continue;
         }
         ui::heading(format!("Profile: {name}"));
+        if deletions.contains(&name) {
+            if editors.contains_key(&name) {
+                ui::detail("marked for deletion (would be removed from the editor on push)");
+            } else {
+                ui::detail("marked for deletion (not present in the editor)");
+            }
+            continue;
+        }
         let in_config = resolved.get(&name);
         let editor_profile = editors.get(&name);
         match (in_config, editor_profile) {
-            (Some(_), None) => ui::detail("only in config (would be created on push)"),
-            (None, Some(_)) => ui::detail("only in editor (would be captured on pull)"),
+            (Some(_), None) => ui::detail(if mirror {
+                "only in config (created on push; REMOVED from config on pull)"
+            } else {
+                "only in config (created on push; kept on pull \u{2014} overlay)"
+            }),
+            (None, Some(_)) => ui::detail(if mirror {
+                "only in editor (DELETED on push; captured on pull)"
+            } else {
+                "only in editor (kept on push \u{2014} overlay; captured on pull)"
+            }),
             (Some(want), Some(profile)) => {
                 let actual = read_actual(ctx.editor, profile)?;
                 report_drift(want, &actual);
@@ -129,16 +168,51 @@ fn report_drift(want: &Resolved, actual: &Actual) {
 // pull (editor -> config)
 // ---------------------------------------------------------------------------
 
-/// Capture the editor's profiles into the config (profile-level), updating the
-/// snapshot. New profiles are added; existing ones are overwritten by the
-/// editor's state expressed as a delta over the profile's groups.
+/// Make the config mirror the editor (editor is authoritative). Captures each
+/// in-scope editor profile and, in mirror mode, removes named config profiles
+/// that no longer exist in the editor. A captured profile that was tombstoned has
+/// its `delete = true` cleared (the editor is truth). Config removals are
+/// confirmed before any write.
 pub fn pull(ctx: &Ctx<'_>, config: &mut Config, snapshot: &mut Snapshot) -> Result<()> {
     let editors = editor_profiles(ctx.editor)?;
     let catalog = extension::pool_catalog(ctx.editor)?;
+    let mirror = ctx.mirror(config);
+
+    // Mirror mode: named config profiles absent from the editor are removed
+    // (but standing tombstones are preserved, and out-of-scope profiles kept).
+    let to_remove: Vec<String> = if mirror {
+        config
+            .profiles
+            .iter()
+            .filter(|(name, p)| ctx.wants(name) && !p.delete && !editors.contains_key(*name))
+            .map(|(name, _)| name.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let destructive: Vec<String> = to_remove
+        .iter()
+        .map(|n| format!("remove profile '{n}' from config"))
+        .collect();
+    if !confirm_destructive(ctx, &destructive)? {
+        ui::info("aborted; nothing written");
+        return Ok(());
+    }
+
     let mut all_extensions: BTreeSet<String> = BTreeSet::new();
     for (name, profile) in &editors {
         if !ctx.wants(name) {
             continue;
+        }
+        // Overlay mode manages only profiles the config already defines (plus the
+        // Default profile); it does not import undefined editor profiles.
+        if !mirror && name != profiles::DEFAULT_PROFILE && !config.profiles.contains_key(name) {
+            continue;
+        }
+        if config.profiles.get(name).is_some_and(|p| p.delete) {
+            ui::warn(format!(
+                "{name}: clearing delete = true (the profile exists in the editor)"
+            ));
         }
         let actual = read_actual(ctx.editor, profile)?;
         all_extensions.extend(actual.extensions.iter().cloned());
@@ -156,6 +230,20 @@ pub fn pull(ctx: &Ctx<'_>, config: &mut Config, snapshot: &mut Snapshot) -> Resu
             actual.extensions.len()
         ));
     }
+
+    for name in &to_remove {
+        config.profiles.remove(name);
+        snapshot.profiles.remove(name);
+        ui::bullet(format!(
+            "{} profile {name} from config",
+            if ctx.dry_run {
+                "would remove"
+            } else {
+                "removed"
+            }
+        ));
+    }
+
     vendor_step(ctx, &catalog, &all_extensions);
     Ok(())
 }
@@ -186,6 +274,7 @@ fn capture_profile(
         d.exclude_extensions = ext_excl;
     } else {
         let entry = config.profiles.entry(name.to_owned()).or_default();
+        entry.delete = false; // capturing a real profile clears any tombstone
         entry.settings = settings_delta;
         entry.extensions = ext_add;
         entry.exclude_extensions = ext_excl;
@@ -233,15 +322,44 @@ fn baseline(config: &Config, name: &str) -> Resolved {
 // push (config -> editor)
 // ---------------------------------------------------------------------------
 
-/// Apply the config's desired state to the editor (non-destructive: sets
-/// resolved settings and installs missing extensions; does not delete
-/// editor-only settings or uninstall extras).
+/// Make the editor mirror the config (config is authoritative). In mirror mode
+/// editor profiles not in the config are deleted; in overlay mode (`--profile`
+/// or `[options] managed`) only the config's own profiles are managed and
+/// `delete = true` tombstones remove specific profiles. Settings/extensions of
+/// managed profiles are mirrored (extras removed). Destructive changes are
+/// summarized and confirmed before any write.
 pub fn push(ctx: &Ctx<'_>, config: &Config, snapshot: &mut Snapshot) -> Result<()> {
     let resolved = config.resolve();
     let mut editors = editor_profiles(ctx.editor)?;
     let catalog = extension::pool_catalog(ctx.editor)?;
-    let mut failures = 0_usize;
+    let mirror = ctx.mirror(config);
+    ensure_tombstones_allowed(ctx, config, mirror)?;
 
+    let to_delete =
+        profiles_to_delete_from_editor(ctx, &resolved, &config.deletions(), &editors, mirror);
+    let destructive = push_destructive_summary(ctx, &resolved, &editors, &to_delete)?;
+    if !confirm_destructive(ctx, &destructive)? {
+        ui::info("aborted; nothing written");
+        return Ok(());
+    }
+
+    // Deletions first, so re-created names (unlikely) start clean.
+    for name in &to_delete {
+        if profiles::delete(ctx.editor, name, ctx.dry_run, &ctx.backup_dir)? {
+            ui::bullet(format!(
+                "{} profile {name}",
+                if ctx.dry_run {
+                    "would delete"
+                } else {
+                    "deleted"
+                }
+            ));
+        }
+        editors.remove(name);
+        snapshot.profiles.remove(name);
+    }
+
+    let mut failures = 0_usize;
     for (name, want) in &resolved {
         if !ctx.wants(name) {
             continue;
@@ -254,28 +372,35 @@ pub fn push(ctx: &Ctx<'_>, config: &Config, snapshot: &mut Snapshot) -> Result<(
             created
         };
 
-        // Settings: write resolved keys (config wins per key), keep others.
+        // Settings: mirror resolved keys, removing editor-only ones.
         if effective_inherits(want, &profile, "settings") {
             ui::bullet(format!("{name}: inherits settings from Default (skipped)"));
         } else {
-            let sets: BTreeMap<String, Value> = want.settings.clone();
-            apply_settings(ctx, &profile, &sets, &[])?;
+            let actual = read_actual(ctx.editor, &profile)?;
+            let removes: Vec<String> = actual
+                .settings
+                .keys()
+                .filter(|k| !want.settings.contains_key(*k))
+                .cloned()
+                .collect();
+            apply_settings(ctx, &profile, &want.settings, &removes)?;
         }
 
-        // Extensions: install any missing desired ones (non-destructive).
+        // Extensions: install missing and uninstall extras (mirror).
         if effective_inherits(want, &profile, "extensions") {
             ui::bullet(format!(
                 "{name}: inherits extensions from Default (skipped)"
             ));
         } else {
             let current = extension::read_membership(ctx.editor, &profile)?;
+            // Never prune the Default profile's list (it is the shared pool).
             failures = failures.saturating_add(apply_extensions(
                 ctx,
                 &profile,
                 &want.extensions,
                 &current,
                 &catalog,
-                false,
+                !profile.is_default(),
             ));
         }
 
@@ -290,6 +415,114 @@ pub fn push(ctx: &Ctx<'_>, config: &Config, snapshot: &mut Snapshot) -> Result<(
     }
     report_failures(failures);
     Ok(())
+}
+
+/// Editor profiles that this push will delete: in-scope `delete = true`
+/// tombstones present in the editor, plus (mirror mode only) editor profiles not
+/// defined in the config. The Default profile is never deleted.
+fn profiles_to_delete_from_editor(
+    ctx: &Ctx<'_>,
+    resolved: &BTreeMap<String, Resolved>,
+    deletions: &BTreeSet<String>,
+    editors: &BTreeMap<String, Profile>,
+    mirror: bool,
+) -> Vec<String> {
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    for name in deletions {
+        if ctx.wants(name) && editors.contains_key(name) {
+            out.insert(name.clone());
+        }
+    }
+    if mirror {
+        for name in editors.keys() {
+            if name != profiles::DEFAULT_PROFILE && ctx.wants(name) && !resolved.contains_key(name)
+            {
+                out.insert(name.clone());
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Human-readable destructive actions a push will perform (profile deletions,
+/// settings-key removals, extension uninstalls), for the confirmation gate.
+fn push_destructive_summary(
+    ctx: &Ctx<'_>,
+    resolved: &BTreeMap<String, Resolved>,
+    editors: &BTreeMap<String, Profile>,
+    to_delete: &[String],
+) -> Result<Vec<String>> {
+    let mut lines: Vec<String> = to_delete
+        .iter()
+        .map(|name| format!("delete profile '{name}'"))
+        .collect();
+    for (name, want) in resolved {
+        if !ctx.wants(name) {
+            continue;
+        }
+        let Some(profile) = editors.get(name) else {
+            continue; // a create is not destructive
+        };
+        let actual = read_actual(ctx.editor, profile)?;
+        if !effective_inherits(want, profile, "settings") {
+            let removed = actual
+                .settings
+                .keys()
+                .filter(|k| !want.settings.contains_key(*k))
+                .count();
+            if removed > 0 {
+                lines.push(format!("{name}: remove {removed} setting(s)"));
+            }
+        }
+        // The Default profile's extension list is the shared pool and is never
+        // pruned, so its extras are not destructive.
+        if !profile.is_default() && !effective_inherits(want, profile, "extensions") {
+            let removed = actual.extensions.difference(&want.extensions).count();
+            if removed > 0 {
+                lines.push(format!("{name}: uninstall {removed} extension(s)"));
+            }
+        }
+    }
+    Ok(lines)
+}
+
+/// Reject `delete = true` tombstones in mirror mode (they are only meaningful in
+/// overlay mode; in mirror mode removing the profile block already deletes it).
+fn ensure_tombstones_allowed(ctx: &Ctx<'_>, config: &Config, mirror: bool) -> Result<()> {
+    if !mirror {
+        return Ok(());
+    }
+    let blocked: Vec<String> = config
+        .deletions()
+        .into_iter()
+        .filter(|n| ctx.wants(n))
+        .collect();
+    if !blocked.is_empty() {
+        anyhow::bail!(
+            "delete = true on {blocked:?} requires overlay mode ([options] managed = true or --profile); in mirror mode remove the profile block instead"
+        );
+    }
+    Ok(())
+}
+
+/// Print a destructive-change summary and gate on confirmation. Returns whether
+/// to proceed. Dry runs proceed (callers only print "would ..."); `--yes` and
+/// non-interactive-without-`--yes` are honored.
+fn confirm_destructive(ctx: &Ctx<'_>, destructive: &[String]) -> Result<bool> {
+    if destructive.is_empty() {
+        return Ok(true);
+    }
+    ui::warn(format!("{} destructive change(s):", destructive.len()));
+    for line in destructive {
+        ui::bullet(line.clone());
+    }
+    if ctx.dry_run || ctx.assume_yes {
+        return Ok(true);
+    }
+    if ctx.non_interactive {
+        anyhow::bail!("destructive changes require confirmation; rerun with --yes");
+    }
+    ui::confirm("Proceed with these destructive changes?", false).context("reading confirmation")
 }
 
 /// Warn about extensions that could not be installed/removed, without failing
@@ -317,7 +550,12 @@ fn effective_inherits(want: &Resolved, profile: &Profile, resource: &str) -> boo
 pub fn sync(ctx: &Ctx<'_>, config: &mut Config, snapshot: &mut Snapshot) -> Result<()> {
     let resolved = config.resolve();
     let editors = editor_profiles(ctx.editor)?;
-    let names = union_names(&resolved, &editors);
+    let deletions = config.deletions();
+    ensure_tombstones_allowed(ctx, config, ctx.mirror(config))?;
+    apply_sync_tombstones(ctx, &deletions, &editors, snapshot)?;
+
+    let mut names = union_names(&resolved, &editors);
+    names.retain(|n| !deletions.contains(n)); // tombstones handled above
     let catalog = extension::pool_catalog(ctx.editor)?;
     let mut failures = 0_usize;
     let mut all_extensions: BTreeSet<String> = BTreeSet::new();
@@ -368,6 +606,65 @@ pub fn sync(ctx: &Ctx<'_>, config: &mut Config, snapshot: &mut Snapshot) -> Resu
     }
     vendor_step(ctx, &catalog, &all_extensions);
     report_failures(failures);
+    Ok(())
+}
+
+/// Apply `delete = true` tombstones during sync: delete in-scope tombstoned
+/// profiles that exist in the editor. If a profile changed in the editor since
+/// the last snapshot, treat it as a conflict (keep editor vs honor the deletion).
+fn apply_sync_tombstones(
+    ctx: &Ctx<'_>,
+    deletions: &BTreeSet<String>,
+    editors: &BTreeMap<String, Profile>,
+    snapshot: &mut Snapshot,
+) -> Result<()> {
+    let mut to_delete: Vec<String> = Vec::new();
+    for name in deletions {
+        if !ctx.wants(name) {
+            continue;
+        }
+        let Some(profile) = editors.get(name) else {
+            continue; // already absent
+        };
+        let actual = read_actual(ctx.editor, profile)?;
+        let changed = snapshot.profile(name).map_or(
+            !actual.settings.is_empty() || !actual.extensions.is_empty(),
+            |base| base.settings != actual.settings || base.extensions != actual.extensions,
+        );
+        if changed
+            && resolve_conflict(
+                ctx,
+                &format!("delete '{name}' vs keep its editor changes since last sync"),
+            )?
+        {
+            ui::warn(format!(
+                "{name}: kept (editor has changes); tombstone not applied"
+            ));
+            continue;
+        }
+        to_delete.push(name.clone());
+    }
+
+    let destructive: Vec<String> = to_delete
+        .iter()
+        .map(|n| format!("delete profile '{n}'"))
+        .collect();
+    if !confirm_destructive(ctx, &destructive)? {
+        anyhow::bail!("aborted; nothing written");
+    }
+    for name in &to_delete {
+        if profiles::delete(ctx.editor, name, ctx.dry_run, &ctx.backup_dir)? {
+            ui::bullet(format!(
+                "{} profile {name}",
+                if ctx.dry_run {
+                    "would delete"
+                } else {
+                    "deleted"
+                }
+            ));
+        }
+        snapshot.profiles.remove(name);
+    }
     Ok(())
 }
 
@@ -739,8 +1036,9 @@ mod tests {
                 editor: &self.editor,
                 dry_run: false,
                 non_interactive: true,
+                assume_yes: true,
                 prefer: None,
-                profile_filter: None,
+                profile_filter: Vec::new(),
                 backup_dir: self.backup_dir.clone(),
                 vendor_dir: self.vendor_dir.clone(),
             }
@@ -775,6 +1073,55 @@ mod tests {
                 &self.editor.extensions_dir.join("extensions.json"),
                 &entries(ids),
             )
+        }
+
+        /// Replace the editor's profile registry with the given (name, location)
+        /// pairs, creating each profile directory.
+        fn set_storage_profiles(&self, profiles: &[(&str, &str)]) -> Result<()> {
+            let arr: Vec<serde_json::Value> = profiles
+                .iter()
+                .map(|(name, loc)| json!({ "location": loc, "name": name }))
+                .collect();
+            write_json(
+                &self
+                    .editor
+                    .user_dir
+                    .join("globalStorage")
+                    .join("storage.json"),
+                &json!({ "userDataProfiles": arr }),
+            )?;
+            for (_, loc) in profiles {
+                fs::create_dir_all(self.editor.user_dir.join("profiles").join(loc))?;
+            }
+            Ok(())
+        }
+
+        fn editor_profile_names(&self) -> Result<Vec<String>> {
+            Ok(crate::editor::profiles::read_all(&self.editor)?
+                .into_iter()
+                .map(|p| p.name)
+                .collect())
+        }
+
+        fn profile_dir_exists(&self, location: &str) -> bool {
+            self.editor
+                .user_dir
+                .join("profiles")
+                .join(location)
+                .is_dir()
+        }
+
+        fn ctx_scoped(&self, names: &[&str]) -> Ctx<'_> {
+            let mut ctx = self.ctx();
+            ctx.profile_filter = names.iter().map(|n| (*n).to_owned()).collect();
+            ctx
+        }
+    }
+
+    fn tombstone() -> ProfileConfig {
+        ProfileConfig {
+            delete: true,
+            ..ProfileConfig::default()
         }
     }
 
@@ -978,6 +1325,147 @@ mod tests {
             classify(Some(&a), Some(&b), Some(&c)),
             Decision::Conflict
         ));
+    }
+
+    #[test]
+    fn mirror_push_deletes_undefined_editor_profile() -> Result<()> {
+        let fixture = Fixture::new()?;
+        fixture.set_storage_profiles(&[("Rust", "-rust"), ("Extra", "-extra")])?;
+        let config = rust_config(&[], &[]); // config defines only Rust
+        let mut snapshot = Snapshot::default();
+
+        push(&fixture.ctx(), &config, &mut snapshot)?;
+
+        let names = fixture.editor_profile_names()?;
+        assert!(names.contains(&"Rust".to_owned()));
+        assert!(
+            !names.contains(&"Extra".to_owned()),
+            "undefined profile removed"
+        );
+        assert!(!fixture.profile_dir_exists("-extra"), "profile dir removed");
+        assert!(snapshot.profile("Extra").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn managed_push_keeps_undefined_editor_profile() -> Result<()> {
+        let fixture = Fixture::new()?;
+        fixture.set_storage_profiles(&[("Rust", "-rust"), ("Extra", "-extra")])?;
+        let mut config = rust_config(&[], &[]);
+        config.options.managed = true; // overlay: leave undefined profiles alone
+        let mut snapshot = Snapshot::default();
+
+        push(&fixture.ctx(), &config, &mut snapshot)?;
+
+        let names = fixture.editor_profile_names()?;
+        assert!(
+            names.contains(&"Extra".to_owned()),
+            "undefined profile kept"
+        );
+        assert!(fixture.profile_dir_exists("-extra"));
+        Ok(())
+    }
+
+    #[test]
+    fn overlay_push_honors_delete_tombstone() -> Result<()> {
+        let fixture = Fixture::new()?;
+        fixture.set_storage_profiles(&[("Rust", "-rust"), ("Legacy", "-legacy")])?;
+        let mut config = rust_config(&[], &[]);
+        config.options.managed = true;
+        config.profiles.insert("Legacy".to_owned(), tombstone());
+        let mut snapshot = Snapshot::default();
+
+        push(&fixture.ctx(), &config, &mut snapshot)?;
+
+        let names = fixture.editor_profile_names()?;
+        assert!(!names.contains(&"Legacy".to_owned()), "tombstone deleted");
+        assert!(!fixture.profile_dir_exists("-legacy"));
+        assert!(names.contains(&"Rust".to_owned()));
+        Ok(())
+    }
+
+    #[test]
+    fn mirror_push_with_tombstone_bails() -> Result<()> {
+        let fixture = Fixture::new()?;
+        fixture.set_storage_profiles(&[("Rust", "-rust")])?;
+        let mut config = rust_config(&[], &[]);
+        config.profiles.insert("Legacy".to_owned(), tombstone()); // mirror mode
+        let mut snapshot = Snapshot::default();
+
+        let result = push(&fixture.ctx(), &config, &mut snapshot);
+        assert!(result.is_err(), "delete = true is invalid in mirror mode");
+        Ok(())
+    }
+
+    #[test]
+    fn scoped_push_leaves_out_of_scope_profile() -> Result<()> {
+        let fixture = Fixture::new()?;
+        fixture.set_storage_profiles(&[("Rust", "-rust"), ("Extra", "-extra")])?;
+        let config = rust_config(&[], &[]);
+        let mut snapshot = Snapshot::default();
+
+        push(&fixture.ctx_scoped(&["Rust"]), &config, &mut snapshot)?;
+
+        let names = fixture.editor_profile_names()?;
+        assert!(
+            names.contains(&"Extra".to_owned()),
+            "out-of-scope profile untouched"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mirror_pull_removes_config_only_profile_but_managed_keeps_it() -> Result<()> {
+        let fixture = Fixture::new()?;
+        fixture.set_storage_profiles(&[("Rust", "-rust")])?; // editor has only Rust
+
+        // Mirror: config-only "Gone" is removed.
+        let mut config = rust_config(&[], &[]);
+        config
+            .profiles
+            .insert("Gone".to_owned(), ProfileConfig::default());
+        let mut snapshot = Snapshot::default();
+        pull(&fixture.ctx(), &mut config, &mut snapshot)?;
+        assert!(config.profiles.contains_key("Rust"));
+        assert!(
+            !config.profiles.contains_key("Gone"),
+            "config-only profile removed"
+        );
+
+        // Managed: config-only "Gone" is kept.
+        let mut managed = rust_config(&[], &[]);
+        managed.options.managed = true;
+        managed
+            .profiles
+            .insert("Gone".to_owned(), ProfileConfig::default());
+        let mut snap2 = Snapshot::default();
+        pull(&fixture.ctx(), &mut managed, &mut snap2)?;
+        assert!(
+            managed.profiles.contains_key("Gone"),
+            "config-only profile kept in overlay"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pull_clears_tombstone_when_editor_has_profile() -> Result<()> {
+        let fixture = Fixture::new()?;
+        fixture.set_storage_profiles(&[("Rust", "-rust")])?;
+        fixture.write_rust_settings(&json!({ "editor.tabSize": 4 }))?;
+        let mut config = rust_config(&[], &[]);
+        config.options.managed = true;
+        config.profiles.insert("Rust".to_owned(), tombstone());
+        let mut snapshot = Snapshot::default();
+
+        pull(&fixture.ctx(), &mut config, &mut snapshot)?;
+
+        let rust = config.profiles.get("Rust");
+        assert_eq!(rust.map(|p| p.delete), Some(false), "tombstone cleared");
+        assert_eq!(
+            rust.and_then(|p| p.settings.get("editor.tabSize")),
+            Some(&json!(4))
+        );
+        Ok(())
     }
 
     #[test]

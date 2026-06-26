@@ -30,9 +30,10 @@ pub struct GlobalArgs {
     #[arg(long = "app-dir", global = true)]
     pub app_dir: Option<PathBuf>,
 
-    /// Limit the operation to a single profile by name.
+    /// Limit the operation to the named profile(s); repeatable. When set, the run
+    /// is scoped (overlay): undefined profiles are never created or deleted.
     #[arg(long, short, global = true)]
-    pub profile: Option<String>,
+    pub profile: Vec<String>,
 
     /// Show what would change without writing anything.
     #[arg(long, global = true)]
@@ -73,10 +74,12 @@ pub enum Command {
     Status,
     /// Create a config from the editor's current profiles.
     Init,
-    /// Apply the config to the editor (config -> editor).
+    /// Make the editor mirror the config (config -> editor; deletes editor extras
+    /// unless scoped by --profile or `[options] managed`).
     Push,
-    /// Update the config from the editor (editor -> config).
+    /// Make the config mirror the editor (editor -> config; removes config-only
+    /// profiles unless scoped by --profile or `[options] managed`).
     Pull,
-    /// Reconcile both directions with conflict resolution.
+    /// Reconcile both directions with conflict resolution (non-destructive merge).
     Sync,
 }

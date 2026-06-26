@@ -10,6 +10,10 @@
       "$ref": "#/$defs/editorRef",
       "description": "How this config refers to / overrides the target editor."
     },
+    "options": {
+      "$ref": "#/$defs/options",
+      "description": "Behavior options (defaults to full-mirror push/pull)."
+    },
     "global": {
       "$ref": "#/$defs/layer",
       "description": "Settings and extensions applied to every managed profile."
@@ -34,6 +38,16 @@
     }
   },
   "$defs": {
+    "options": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "managed": {
+          "type": "boolean",
+          "description": "Managed/overlay mode. When true, push/pull manage only the profiles defined in this config (plus delete = true tombstones) and never create or delete undefined profiles. Default false = full mirror (the config owns the entire profile set)."
+        }
+      }
+    },
     "extensionId": {
       "type": "string",
       "description": "Extension identifier 'publisher.name', optionally pinned as 'publisher.name@version'. Pins are parsed but not enforced for membership.",
@@ -155,7 +169,20 @@
         "use_default": {
           "$ref": "#/$defs/useDefault",
           "description": "Resource types this profile inherits from the Default profile."
+        },
+        "delete": {
+          "type": "boolean",
+          "description": "Tombstone: delete this profile from the editor if it exists. Valid only in overlay mode ([options] managed = true or --profile). Must not be combined with any other field."
         }
+      },
+      "if": {
+        "properties": { "delete": { "const": true } },
+        "required": ["delete"]
+      },
+      "then": {
+        "description": "A tombstone (delete = true) must carry no other fields.",
+        "properties": { "delete": { "const": true } },
+        "additionalProperties": false
       }
     }
   },

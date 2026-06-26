@@ -27,12 +27,41 @@ const CONFIG_HEADER: &str = concat!(
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub editor: EditorRef,
+    /// Behavior options (defaults to full-mirror push/pull).
+    #[serde(skip_serializing_if = "Options::is_default")]
+    pub options: Options,
     pub global: Layer,
     pub groups: BTreeMap<String, Layer>,
     /// The built-in Default profile (always present; cannot be renamed).
     pub default: DefaultProfile,
     /// Named (non-default) profiles.
     pub profiles: BTreeMap<String, ProfileConfig>,
+}
+
+/// Top-level behavior options.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Options {
+    /// Managed/overlay mode. When `true`, push/pull manage **only** the profiles
+    /// defined in this config (plus `delete = true` tombstones) and never create
+    /// or delete profiles that aren't defined here. Default `false` = full mirror,
+    /// where the config is authoritative over the entire profile set.
+    #[serde(skip_serializing_if = "is_false")]
+    pub managed: bool,
+}
+
+impl Options {
+    fn is_default(&self) -> bool {
+        !self.managed
+    }
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if requires fn(&T) -> bool"
+)]
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// The built-in Default profile. Unlike named profiles it has no icon and no
@@ -95,6 +124,25 @@ pub struct ProfileConfig {
     pub exclude_extensions: Vec<String>,
     /// Resource types this profile inherits from Default (`useDefaultFlags`).
     pub use_default: BTreeMap<String, bool>,
+    /// Tombstone: delete this profile from the editor if it exists. Valid only in
+    /// overlay mode (`[options] managed = true` or `--profile`); must not be
+    /// combined with any other field. Kept after a push so it re-asserts across
+    /// devices.
+    #[serde(skip_serializing_if = "is_false")]
+    pub delete: bool,
+}
+
+impl ProfileConfig {
+    /// Whether this profile declares any managed content (so a tombstone with
+    /// content can be rejected).
+    fn has_content(&self) -> bool {
+        self.icon.is_some()
+            || !self.groups.is_empty()
+            || !self.settings.is_empty()
+            || !self.extensions.is_empty()
+            || !self.exclude_extensions.is_empty()
+            || !self.use_default.is_empty()
+    }
 }
 
 /// Effective desired state for one profile after layering.
@@ -118,7 +166,23 @@ impl Config {
                 "the Default profile is configured under [default], not [profiles.{DEFAULT_PROFILE}]"
             );
         }
+        for (name, profile) in &config.profiles {
+            if profile.delete && profile.has_content() {
+                anyhow::bail!(
+                    "profile '{name}' sets delete = true alongside other fields; a tombstone must have no settings, extensions, groups, icon, or use_default"
+                );
+            }
+        }
         Ok(config)
+    }
+
+    /// Names of profiles marked for deletion (`delete = true` tombstones).
+    pub fn deletions(&self) -> BTreeSet<String> {
+        self.profiles
+            .iter()
+            .filter(|(_, p)| p.delete)
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     /// Serialize the config to a TOML string with a generated-file header.
@@ -147,6 +211,9 @@ impl Config {
         let mut out = BTreeMap::new();
         out.insert(DEFAULT_PROFILE.to_owned(), self.resolve_default());
         for (name, profile) in &self.profiles {
+            if profile.delete {
+                continue; // tombstone: no desired state
+            }
             out.insert(name.clone(), self.resolve_profile(profile));
         }
         out
@@ -559,6 +626,55 @@ mod tests {
             !validator.is_valid(&json!({ "profiles": { "Default": {} } })),
             "[profiles.Default] must fail validation; use [default]"
         );
+        assert!(
+            !validator.is_valid(
+                &json!({ "profiles": { "Legacy": { "delete": true, "extensions": ["pub.x"] } } })
+            ),
+            "delete = true combined with content must fail validation"
+        );
+    }
+
+    #[test]
+    fn schema_accepts_managed_option_and_tombstone() {
+        let validator = schema_validator();
+        assert!(validator.is_valid(&json!({ "options": { "managed": true } })));
+        assert!(validator.is_valid(&json!({ "profiles": { "Legacy": { "delete": true } } })));
+    }
+
+    #[test]
+    fn load_rejects_delete_with_content_and_excludes_tombstones() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("bad.toml");
+        std::fs::write(
+            &bad,
+            "[profiles.Legacy]\ndelete = true\nextensions = [\"pub.x\"]\n",
+        )
+        .unwrap();
+        assert!(
+            Config::load(&bad).is_err(),
+            "delete = true with content must be rejected"
+        );
+
+        let ok = dir.path().join("ok.toml");
+        std::fs::write(&ok, "[profiles.Legacy]\ndelete = true\n").unwrap();
+        let config = Config::load(&ok).unwrap();
+        assert_eq!(config.deletions(), BTreeSet::from(["Legacy".to_owned()]));
+        assert!(
+            !config.resolve().contains_key("Legacy"),
+            "tombstone has no resolved desired state"
+        );
+    }
+
+    #[test]
+    fn managed_option_roundtrips_and_defaults_off() {
+        let mut config = Config::default();
+        assert!(!config.options.managed);
+        assert!(!config.to_toml().unwrap().contains("[options]"));
+
+        config.options.managed = true;
+        let toml = config.to_toml().unwrap();
+        assert!(toml.contains("[options]"));
+        assert!(toml.contains("managed = true"));
     }
 
     #[test]
