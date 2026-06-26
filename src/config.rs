@@ -90,7 +90,7 @@ pub struct ProfileConfig {
 }
 
 /// Effective desired state for one profile after layering.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Resolved {
     pub settings: BTreeMap<String, Value>,
     pub extensions: BTreeSet<String>,
@@ -211,6 +211,101 @@ impl Config {
             use_default: use_default.clone(),
         }
     }
+
+    /// Hoist settings and extensions common to *every* profile (including the
+    /// Default profile) into `[global]`, then re-express each profile as a delta.
+    ///
+    /// This is behavior-preserving: because only items present in every profile
+    /// are moved, `resolve()` produces the same result before and after.
+    pub fn consolidate(&mut self) -> Consolidation {
+        let resolved = self.resolve();
+        let mut profiles = resolved.values();
+        let Some(first) = profiles.next() else {
+            return Consolidation::default();
+        };
+        let mut common_settings = first.settings.clone();
+        let mut common_extensions = first.extensions.clone();
+        for profile in profiles {
+            common_settings.retain(|key, value| profile.settings.get(key) == Some(value));
+            common_extensions.retain(|id| profile.extensions.contains(id));
+        }
+
+        // Count only what is newly added to global.
+        let existing_global: BTreeSet<String> = self
+            .global
+            .extensions
+            .iter()
+            .map(|id| normalize_id(id))
+            .collect();
+        let report = Consolidation {
+            settings: common_settings
+                .iter()
+                .filter(|(key, value)| self.global.settings.get(*key) != Some(*value))
+                .count(),
+            extensions: common_extensions
+                .iter()
+                .filter(|id| !existing_global.contains(*id))
+                .count(),
+        };
+
+        for (key, value) in &common_settings {
+            self.global.settings.insert(key.clone(), value.clone());
+        }
+        let mut global_extensions = existing_global;
+        global_extensions.extend(common_extensions.iter().cloned());
+        self.global.extensions = global_extensions.into_iter().collect();
+
+        // Re-express each profile as a minimal delta over the new global+groups.
+        for (name, effective) in &resolved {
+            let groups = self.groups_for(name);
+            let base =
+                self.resolve_layers(&groups, &BTreeMap::new(), &[], &[], None, &BTreeMap::new());
+            let settings = effective
+                .settings
+                .iter()
+                .filter(|(key, value)| base.settings.get(*key) != Some(*value))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            let extensions = effective
+                .extensions
+                .difference(&base.extensions)
+                .cloned()
+                .collect();
+            let exclude = base
+                .extensions
+                .difference(&effective.extensions)
+                .cloned()
+                .collect();
+            if name == DEFAULT_PROFILE {
+                self.default.settings = settings;
+                self.default.extensions = extensions;
+                self.default.exclude_extensions = exclude;
+            } else if let Some(profile) = self.profiles.get_mut(name) {
+                profile.settings = settings;
+                profile.extensions = extensions;
+                profile.exclude_extensions = exclude;
+            }
+        }
+        report
+    }
+
+    fn groups_for(&self, name: &str) -> Vec<String> {
+        if name == DEFAULT_PROFILE {
+            self.default.groups.clone()
+        } else {
+            self.profiles
+                .get(name)
+                .map(|p| p.groups.clone())
+                .unwrap_or_default()
+        }
+    }
+}
+
+/// What `consolidate` moved into `[global]`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Consolidation {
+    pub settings: usize,
+    pub extensions: usize,
 }
 
 /// Normalize an extension identifier for set membership: drop any `@version`
@@ -306,6 +401,47 @@ mod tests {
     fn normalize_id_drops_version_and_lowercases() {
         assert_eq!(normalize_id("Pub.Name@1.2.3"), "pub.name");
         assert_eq!(normalize_id("  a.b  "), "a.b");
+    }
+
+    #[test]
+    fn consolidate_hoists_common_items_and_preserves_resolution() {
+        let mut config = Config::default();
+        // Default and one named profile both share a setting and an extension,
+        // and each has something unique.
+        config
+            .default
+            .settings
+            .insert("shared".to_owned(), json!(1));
+        config
+            .default
+            .settings
+            .insert("only_default".to_owned(), json!("d"));
+        config.default.extensions = vec!["pub.shared".to_owned(), "pub.default".to_owned()];
+        config.profiles.insert(
+            "Rust".to_owned(),
+            ProfileConfig {
+                settings: BTreeMap::from([
+                    ("shared".to_owned(), json!(1)),
+                    ("only_rust".to_owned(), json!("r")),
+                ]),
+                extensions: vec!["pub.shared".to_owned(), "pub.rust".to_owned()],
+                ..ProfileConfig::default()
+            },
+        );
+
+        let before = config.resolve();
+        let report = config.consolidate();
+        let after = config.resolve();
+
+        assert_eq!(before, after, "consolidation must preserve resolution");
+        assert_eq!(report.settings, 1);
+        assert_eq!(report.extensions, 1);
+        assert_eq!(config.global.settings.get("shared"), Some(&json!(1)));
+        assert!(config.global.extensions.contains(&"pub.shared".to_owned()));
+        // The shared items are gone from the individual profiles.
+        assert!(!config.default.settings.contains_key("shared"));
+        let rust = config.profiles.get("Rust").unwrap();
+        assert!(!rust.extensions.contains(&"pub.shared".to_owned()));
     }
 
     #[test]

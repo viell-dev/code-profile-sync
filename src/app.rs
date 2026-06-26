@@ -285,9 +285,30 @@ fn run_init(mut session: Session, g: &GlobalArgs) -> Result<()> {
     let ctx = make_ctx(&session.editor, g, session.backup_dir.clone());
     sync::pull(&ctx, &mut session.config, &mut session.snapshot)?;
     drop(ctx);
+
+    // Hoist settings/extensions common to every profile into [global]. Default
+    // to yes; only ask when interactive.
+    let consolidate = g.yes
+        || g.non_interactive
+        || ui::confirm(
+            "Consolidate settings/extensions shared by all profiles into [global]?",
+            true,
+        )?;
+    if consolidate {
+        run_consolidate(&mut session);
+    }
+
     session.save_config(g.dry_run)?;
     session.save_snapshot(g.dry_run)?;
     Ok(())
+}
+
+fn run_consolidate(session: &mut Session) {
+    let report = session.config.consolidate();
+    ui::info(format!(
+        "consolidated {} setting(s) and {} extension(s) into [global]",
+        report.settings, report.extensions
+    ));
 }
 
 /// Apply the config to the editor.
@@ -398,6 +419,7 @@ fn menu_loop(mut session: Session, g: &GlobalArgs) -> Result<()> {
         "Sync (reconcile both ways)",
         "Overwrite profiles from config (push)",
         "Overwrite config from profiles (pull)",
+        "Consolidate shared settings/extensions into [global]",
         "Exit",
     ];
     loop {
@@ -424,6 +446,10 @@ fn menu_loop(mut session: Session, g: &GlobalArgs) -> Result<()> {
                 sync::pull(&ctx, &mut session.config, &mut session.snapshot)?;
                 session.save_config(g.dry_run)?;
                 session.save_snapshot(g.dry_run)?;
+            }
+            3 => {
+                run_consolidate(&mut session);
+                session.save_config(g.dry_run)?;
             }
             _ => return Ok(()),
         }
