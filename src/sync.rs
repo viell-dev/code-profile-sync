@@ -164,6 +164,57 @@ fn report_drift(want: &Resolved, actual: &Actual) {
     }
 }
 
+/// Where a profile exists and whether it is in sync, for the interactive
+/// per-profile menu's overview list.
+pub struct ProfileSummary {
+    pub name: String,
+    pub in_config: bool,
+    pub in_editor: bool,
+    pub tombstone: bool,
+    /// `Some` only when the profile is present on both sides; `true` = in sync.
+    pub in_sync: Option<bool>,
+}
+
+/// Summarize every profile across the config and the editor (ignores the profile
+/// filter; the overview always lists everything).
+pub fn profile_summaries(ctx: &Ctx<'_>, config: &Config) -> Result<Vec<ProfileSummary>> {
+    let resolved = config.resolve();
+    let editors = editor_profiles(ctx.editor)?;
+    let deletions = config.deletions();
+
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    names.extend(resolved.keys().cloned());
+    names.extend(editors.keys().cloned());
+    names.extend(deletions.iter().cloned());
+
+    let mut out = Vec::new();
+    for name in names {
+        let tombstone = deletions.contains(&name);
+        let want = resolved.get(&name);
+        let profile = editors.get(&name);
+        let in_sync = match (want, profile) {
+            (Some(want), Some(profile)) if !tombstone => {
+                let actual = read_actual(ctx.editor, profile)?;
+                Some(
+                    want.settings
+                        .iter()
+                        .all(|(k, v)| actual.settings.get(k) == Some(v))
+                        && want.extensions == actual.extensions,
+                )
+            }
+            _ => None,
+        };
+        out.push(ProfileSummary {
+            name,
+            in_config: tombstone || want.is_some(),
+            in_editor: profile.is_some(),
+            tombstone,
+            in_sync,
+        });
+    }
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // pull (editor -> config)
 // ---------------------------------------------------------------------------
@@ -1300,6 +1351,34 @@ mod tests {
                 .map(|profile| profile.extensions.clone()),
             Some(BTreeSet::from(["pub.repo".to_owned()]))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn profile_summaries_report_location_and_sync_state() -> Result<()> {
+        let fixture = Fixture::new()?;
+        fixture.set_storage_profiles(&[("Rust", "-rust"), ("Extra", "-extra")])?;
+        // Rust is in sync; config defines Rust and tombstones Legacy.
+        let mut config = rust_config(&[], &[]);
+        config.options.managed = true;
+        config.profiles.insert("Legacy".to_owned(), tombstone());
+
+        let summaries = super::profile_summaries(&fixture.ctx(), &config)?;
+        let by_name = |n: &str| summaries.iter().find(|s| s.name == n);
+
+        assert!(
+            by_name("Rust").is_some_and(|s| s.in_config && s.in_editor && s.in_sync == Some(true)),
+            "Rust is in config + editor and in sync"
+        );
+        assert!(
+            by_name("Extra").is_some_and(|s| s.in_editor && !s.in_config && s.in_sync.is_none()),
+            "Extra is editor-only"
+        );
+        assert!(
+            by_name("Legacy").is_some_and(|s| s.tombstone && s.in_config && !s.in_editor),
+            "Legacy is a config tombstone"
+        );
+        assert!(by_name("Default").is_some(), "Default always listed");
         Ok(())
     }
 

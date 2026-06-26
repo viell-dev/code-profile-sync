@@ -615,6 +615,7 @@ fn menu_loop(mut session: Session, g: &GlobalArgs) -> Result<()> {
         "Sync (reconcile both ways)",
         "Push: make the editor match the config (REPLACES editor profiles)",
         "Pull: make the config match the editor (REPLACES config profiles)",
+        "Manage a single profile…",
         "Consolidate shared settings/extensions into [global]",
         "Choose a different editor",
         "Exit",
@@ -659,11 +660,12 @@ fn menu_loop(mut session: Session, g: &GlobalArgs) -> Result<()> {
                 session.save_config(g.dry_run)?;
                 session.save_snapshot(g.dry_run)?;
             }
-            3 => {
+            3 => manage_profile_menu(&mut session, g)?,
+            4 => {
                 run_consolidate(&mut session);
                 session.save_config(g.dry_run)?;
             }
-            4 => {
+            5 => {
                 let app_paths = if let Some(app_paths) = session.app_paths.clone() {
                     app_paths
                 } else {
@@ -675,4 +677,181 @@ fn menu_loop(mut session: Session, g: &GlobalArgs) -> Result<()> {
             _ => return Ok(()),
         }
     }
+}
+
+/// An engine context scoped to a single profile (overlay mode), so an action
+/// touches only that profile and never creates/deletes the others.
+fn scoped_ctx<'a>(
+    editor: &'a Editor,
+    g: &GlobalArgs,
+    backup_dir: PathBuf,
+    vendor_dir: PathBuf,
+    name: &str,
+) -> Ctx<'a> {
+    let mut ctx = make_ctx(editor, g, backup_dir, vendor_dir);
+    ctx.profile_filter = vec![name.to_owned()];
+    ctx
+}
+
+/// A selectable label: profile name + where it lives + its sync state.
+fn profile_label(s: &sync::ProfileSummary) -> String {
+    let location = match (s.in_config, s.in_editor) {
+        (true, true) => "config + editor",
+        (true, false) => "config only",
+        (false, true) => "editor only",
+        (false, false) => "unknown",
+    };
+    let state = if s.tombstone {
+        "marked for deletion"
+    } else {
+        match s.in_sync {
+            Some(true) => "in sync",
+            Some(false) => "drift",
+            None => "-",
+        }
+    };
+    format!("{}  [{location}] {state}", s.name)
+}
+
+/// Overview of all profiles (config and/or editor); pick one to manage.
+fn manage_profile_menu(session: &mut Session, g: &GlobalArgs) -> Result<()> {
+    loop {
+        let summaries = {
+            let mut ctx = make_ctx(
+                &session.editor,
+                g,
+                session.backup_dir.clone(),
+                session.vendor_dir.clone(),
+            );
+            ctx.profile_filter = Vec::new(); // always list every profile
+            sync::profile_summaries(&ctx, &session.config)?
+        };
+        if summaries.is_empty() {
+            ui::info("No profiles in the config or the editor.");
+            return Ok(());
+        }
+        ui::heading("Profiles");
+        let mut labels: Vec<String> = summaries.iter().map(profile_label).collect();
+        labels.push("Back".to_owned());
+        let choice =
+            ui::select("Select a profile to manage", &labels).context("reading profile choice")?;
+        match summaries.get(choice) {
+            Some(summary) => profile_action_menu(session, g, &summary.name)?,
+            None => return Ok(()), // Back
+        }
+    }
+}
+
+/// Actions scoped to one profile. Returns to the profile list on Back, or after
+/// the profile is deleted.
+fn profile_action_menu(session: &mut Session, g: &GlobalArgs, name: &str) -> Result<()> {
+    let actions = [
+        "Status / drift",
+        "Sync this profile",
+        "Push this profile (config -> editor)",
+        "Pull this profile (editor -> config)",
+        "Delete this profile",
+        "Back",
+    ];
+    loop {
+        let choice = ui::select(&format!("Profile: {name}"), &actions.map(str::to_owned))
+            .context("reading action choice")?;
+        match choice {
+            0 => {
+                let ctx = scoped_ctx(
+                    &session.editor,
+                    g,
+                    session.backup_dir.clone(),
+                    session.vendor_dir.clone(),
+                    name,
+                );
+                sync::status(&ctx, &session.config)?;
+            }
+            1 => {
+                session.ensure_editor_closed(g)?;
+                ui::heading(format!("Syncing {name}"));
+                let ctx = scoped_ctx(
+                    &session.editor,
+                    g,
+                    session.backup_dir.clone(),
+                    session.vendor_dir.clone(),
+                    name,
+                );
+                sync::sync(&ctx, &mut session.config, &mut session.snapshot)?;
+                session.save_config(g.dry_run)?;
+                session.save_snapshot(g.dry_run)?;
+            }
+            2 => {
+                session.ensure_editor_closed(g)?;
+                ui::heading(format!("Pushing {name} to editor"));
+                let ctx = scoped_ctx(
+                    &session.editor,
+                    g,
+                    session.backup_dir.clone(),
+                    session.vendor_dir.clone(),
+                    name,
+                );
+                sync::push(&ctx, &session.config, &mut session.snapshot)?;
+                session.save_snapshot(g.dry_run)?;
+            }
+            3 => {
+                ui::heading(format!("Pulling {name} into config"));
+                let ctx = scoped_ctx(
+                    &session.editor,
+                    g,
+                    session.backup_dir.clone(),
+                    session.vendor_dir.clone(),
+                    name,
+                );
+                sync::pull(&ctx, &mut session.config, &mut session.snapshot)?;
+                session.save_config(g.dry_run)?;
+                session.save_snapshot(g.dry_run)?;
+            }
+            4 => {
+                if delete_profile_action(session, g, name)? {
+                    return Ok(()); // profile gone; back to the list
+                }
+            }
+            _ => return Ok(()),
+        }
+    }
+}
+
+/// Delete a single profile from the editor and the config. Returns whether the
+/// profile was removed (so the caller leaves the per-profile submenu).
+fn delete_profile_action(session: &mut Session, g: &GlobalArgs, name: &str) -> Result<bool> {
+    if name == profiles::DEFAULT_PROFILE {
+        ui::warn("the Default profile cannot be deleted");
+        return Ok(false);
+    }
+    let confirmed = g.yes
+        || g.non_interactive
+        || ui::confirm(
+            &format!("Delete profile '{name}' from the editor and config? This cannot be undone."),
+            false,
+        )
+        .context("reading confirmation")?;
+    if !confirmed {
+        ui::info("aborted");
+        return Ok(false);
+    }
+    session.ensure_editor_closed(g)?;
+    if profiles::delete(&session.editor, name, g.dry_run, &session.backup_dir)? {
+        ui::bullet(format!(
+            "{} profile {name} from editor",
+            if g.dry_run { "would delete" } else { "deleted" }
+        ));
+    } else {
+        ui::detail(format!("{name} is not present in the editor"));
+    }
+    if session.config.profiles.remove(name).is_some() {
+        ui::bullet(format!(
+            "{} {name} from config",
+            if g.dry_run { "would remove" } else { "removed" }
+        ));
+    }
+    session.snapshot.profiles.remove(name);
+    session.save_config(g.dry_run)?;
+    session.save_snapshot(g.dry_run)?;
+    Ok(true)
 }
