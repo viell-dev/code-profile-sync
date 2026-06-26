@@ -765,7 +765,10 @@ fn profile_action_menu(session: &mut Session, g: &GlobalArgs, name: &str) -> Res
         if name != profiles::DEFAULT_PROFILE {
             actions.push((ProfileAction::Delete, "Delete this profile"));
         }
-        let mut labels: Vec<String> = actions.iter().map(|(_, label)| (*label).to_owned()).collect();
+        let mut labels: Vec<String> = actions
+            .iter()
+            .map(|(_, label)| (*label).to_owned())
+            .collect();
         labels.push("Back".to_owned());
 
         let choice =
