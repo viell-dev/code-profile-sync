@@ -11,6 +11,33 @@ snippets, tasks, and MCP are designed-for but deferred.
 
 ---
 
+## Implementation status (MVP)
+
+Done and verified (Code - OSS as testbench; VSCodium read-only): editor discovery
+(`detect`), profile inspection (`list-profiles`), `status`, `init`, `pull`, `push`,
+3-way `sync` with conflict resolution, the interactive flow, JSONC settings
+read/merge/write, extension install/uninstall via the editor CLI, running-editor gate,
+atomic writes, backups, and `--dry-run`. Unit tests cover config layering, null
+stripping, id normalization, TOML round-tripping, and the 3-way classify table.
+
+Deviations from the design below, kept deliberately simple for the MVP:
+
+- **`push` is non-destructive** — it sets the config's settings keys and installs missing
+  extensions but never deletes editor-only settings or uninstalls extras. Removals flow
+  only through `sync` (snapshot-gated). A destructive `--prune` push is future work.
+- **Settings are null-free** — JSON `null` is stripped at the read boundary (TOML has no
+  null), so settings explicitly set to `null` are not managed.
+- **Extensions go through the editor CLI** for both install and uninstall (the "direct
+  edit `extensions.json`" half of the hybrid plan is not yet implemented).
+- **No JSON Schema yet** — generated configs carry a plain header instead of a `#:schema`
+  directive. A `schemars`-derived schema (PLAN §2.1) is still optional/future.
+- **Keybindings / snippets / tasks / MCP** are not synced yet.
+- **Shared extension pool caveat**: the Default profile's extension list is the shared
+  pool's own `extensions.json`, which Code - OSS and VSCodium share — `sync` on the
+  Default profile's extensions can therefore affect both editors.
+
+---
+
 ## 0. Editor discovery — detect binaries, identify via `product.json`
 
 **Detect installed editors by their binaries, not their config directories** (stale

@@ -6,7 +6,8 @@ extensions once — globally, in reusable groups, and per profile — then push 
 the editor, pull editor changes back, or reconcile both directions with conflict
 resolution.
 
-> Status: planning. See [`PLAN.md`](./PLAN.md) for the full design.
+> Status: working MVP (settings + extensions). See [`PLAN.md`](./PLAN.md) for the full
+> design and what's still deferred.
 
 ## Why
 
@@ -27,19 +28,61 @@ default" inheritance (e.g. profiles that share the default keybindings).
   also a direct subcommand (`status`/`pull`/`push`/`sync`) for scripting.
 - **Sync:** 3-way with per-item conflict resolution (keep editor / keep repo). You're
   prompted to close the editor before any write.
-- **Extensions:** hybrid writes — edit `extensions.json` directly when the extension is
-  already on disk, otherwise fall back to the editor CLI to fetch it.
+- **Extensions:** installs/uninstalls go through the editor's own CLI (no marketplace
+  lookups of our own). IDs enter a config by hand or via `pull`.
+
+## Usage
+
+```sh
+# Discover installed editors
+code-profile-sync detect
+
+# Inspect a selected editor's profiles (read-only)
+code-profile-sync --editor VSCodium list-profiles
+
+# Create a config from an editor's current profiles
+code-profile-sync --editor "Code - OSS" init
+
+# See what would change, then apply
+code-profile-sync --editor "Code - OSS" status
+code-profile-sync --editor "Code - OSS" --dry-run push
+code-profile-sync --editor "Code - OSS" push
+
+# Reconcile both directions (prompts on conflict; or --prefer editor|repo)
+code-profile-sync --editor "Code - OSS" sync
+
+# No subcommand → interactive wizard + menu
+code-profile-sync
+```
+
+Selectors match an editor's `nameShort` or `applicationName` (e.g. `VSCodium`,
+`"Code - OSS"`, `code-oss`). `--config <path>` overrides the default config file
+(`<applicationName>.toml` in the working directory). `--profile <name>` limits an
+operation to one profile. The snapshot used for 3-way sync lives in
+`.code-profile-sync/` next to the config.
+
+### Behavior notes
+
+- **`push`** is non-destructive: it sets the config's settings keys and installs missing
+  extensions, but does not delete editor-only settings or uninstall extras. **`sync`** is
+  the bidirectional path that also propagates removals (gated by the snapshot).
+- Code - OSS and VSCodium share one extension pool (`~/.vscode-oss/extensions`), and the
+  **Default** profile's extension list is that pool's own `extensions.json`. Be aware that
+  syncing the Default profile's extensions can affect both editors.
 
 ## Safety
 
 The editor **must be closed** while writing — it owns these files and will overwrite
 changes on exit. Mutating commands detect a running editor and refuse without
-`--force`, write atomically, take backups, and support `--dry-run`.
+`--force`, write atomically, take backups (under `.code-profile-sync/backups/`), and
+support `--dry-run`.
 
 ## Building
 
 ```sh
-cargo build
+cargo build      # binary at target/debug/code-profile-sync
+cargo test       # unit tests
+cargo clippy --all-targets
 ```
 
 Requires the Rust toolchain pinned in `rust-toolchain.toml`.
