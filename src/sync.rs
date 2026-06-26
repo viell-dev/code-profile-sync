@@ -40,7 +40,9 @@ fn read_actual(editor: &Editor, profile: &Profile) -> Result<Actual> {
     let settings = if profile.inherits("settings") {
         BTreeMap::new()
     } else {
-        jsonc::read_object(&profile.settings_path(editor))?.into_iter().collect()
+        let raw: BTreeMap<String, Value> =
+            jsonc::read_object(&profile.settings_path(editor))?.into_iter().collect();
+        crate::config::sanitize_settings(&raw)
     };
     let extensions = if profile.inherits("extensions") {
         BTreeSet::new()
@@ -503,4 +505,34 @@ fn union_names(
     names.extend(resolved.keys().cloned());
     names.extend(editors.keys().cloned());
     names.into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{Decision, classify};
+
+    #[test]
+    fn classify_three_way_truth_table() {
+        let a = json!(1);
+        let b = json!(2);
+        let c = json!(3);
+
+        assert!(matches!(classify(None, Some(&a), Some(&a)), Decision::Agree));
+        assert!(matches!(classify(Some(&a), Some(&b), Some(&a)), Decision::TakeRepo));
+        assert!(matches!(classify(Some(&a), Some(&a), Some(&b)), Decision::TakeEditor));
+        assert!(matches!(classify(Some(&a), Some(&b), Some(&c)), Decision::Conflict));
+    }
+
+    #[test]
+    fn classify_without_base_adopts_the_present_side() {
+        let a = json!(1);
+        let b = json!(2);
+        // Only one side has the item and there is no base: take that side.
+        assert!(matches!(classify(None, Some(&a), None), Decision::TakeRepo));
+        assert!(matches!(classify(None, None, Some(&a)), Decision::TakeEditor));
+        // Both present but differing, no base: a genuine conflict.
+        assert!(matches!(classify(None, Some(&a), Some(&b)), Decision::Conflict));
+    }
 }

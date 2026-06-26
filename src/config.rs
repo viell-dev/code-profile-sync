@@ -87,10 +87,23 @@ impl Config {
         Ok(config)
     }
 
-    /// Serialize the config to a TOML string with a schema directive header.
+    /// Serialize the config to a TOML string with a generated-file header.
     pub fn to_toml(&self) -> Result<String> {
-        let body = toml::to_string_pretty(self).context("serializing config")?;
-        Ok(format!("#:schema ./schema/config.schema.json\n\n{body}"))
+        let body = toml::to_string_pretty(&self.sanitized()).context("serializing config")?;
+        Ok(format!("# code-profile-sync config. See README.md for the format.\n\n{body}"))
+    }
+
+    /// A clone with all settings null values stripped (TOML has no null type).
+    fn sanitized(&self) -> Self {
+        let mut clone = self.clone();
+        clone.global.settings = sanitize_settings(&clone.global.settings);
+        for group in clone.groups.values_mut() {
+            group.settings = sanitize_settings(&group.settings);
+        }
+        for profile in clone.profiles.values_mut() {
+            profile.settings = sanitize_settings(&profile.settings);
+        }
+        clone
     }
 
     /// Effective desired state per profile (keyed by profile name).
@@ -138,4 +151,98 @@ impl Config {
 pub fn normalize_id(spec: &str) -> String {
     let id = spec.split('@').next().unwrap_or(spec);
     id.trim().to_lowercase()
+}
+
+/// Recursively remove JSON `null` (TOML cannot represent it): `null` itself maps
+/// to `None`; nulls inside objects/arrays are dropped.
+pub fn strip_nulls(value: &Value) -> Option<Value> {
+    match value {
+        Value::Null => None,
+        Value::Array(items) => Some(Value::Array(items.iter().filter_map(strip_nulls).collect())),
+        Value::Object(map) => {
+            let cleaned =
+                map.iter().filter_map(|(k, v)| strip_nulls(v).map(|s| (k.clone(), s))).collect();
+            Some(Value::Object(cleaned))
+        }
+        other => Some(other.clone()),
+    }
+}
+
+/// Strip nulls across a settings map, dropping keys whose value was `null`.
+pub fn sanitize_settings(settings: &BTreeMap<String, Value>) -> BTreeMap<String, Value> {
+    settings.iter().filter_map(|(k, v)| strip_nulls(v).map(|s| (k.clone(), s))).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #![expect(clippy::unwrap_used, reason = "unit tests")]
+
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn resolve_layers_global_group_and_profile() {
+        let mut config = Config::default();
+        config.global.settings.insert("a".to_owned(), json!(1));
+        config.global.extensions.push("pub.global".to_owned());
+        config.groups.insert(
+            "g".to_owned(),
+            Layer {
+                settings: BTreeMap::from([("b".to_owned(), json!(2))]),
+                extensions: vec!["pub.group".to_owned()],
+            },
+        );
+        config.profiles.insert(
+            "P".to_owned(),
+            ProfileConfig {
+                groups: vec!["g".to_owned()],
+                settings: BTreeMap::from([("a".to_owned(), json!(10))]),
+                extensions: vec!["pub.profile".to_owned()],
+                exclude_extensions: vec!["pub.global".to_owned()],
+                ..ProfileConfig::default()
+            },
+        );
+
+        let resolved = config.resolve();
+        let p = resolved.get("P").unwrap();
+        assert_eq!(p.settings.get("a"), Some(&json!(10)), "profile overrides global");
+        assert_eq!(p.settings.get("b"), Some(&json!(2)), "group setting present");
+        assert!(p.extensions.contains("pub.group"));
+        assert!(p.extensions.contains("pub.profile"));
+        assert!(!p.extensions.contains("pub.global"), "exclude removed a global extension");
+    }
+
+    #[test]
+    fn strip_nulls_removes_nulls_recursively() {
+        let value = json!({"a": 1, "b": null, "c": {"d": null, "e": 2}, "f": [1, null, 2]});
+        let stripped = strip_nulls(&value).unwrap();
+        assert_eq!(stripped, json!({"a": 1, "c": {"e": 2}, "f": [1, 2]}));
+    }
+
+    #[test]
+    fn normalize_id_drops_version_and_lowercases() {
+        assert_eq!(normalize_id("Pub.Name@1.2.3"), "pub.name");
+        assert_eq!(normalize_id("  a.b  "), "a.b");
+    }
+
+    #[test]
+    fn toml_roundtrips_dotted_and_nested_settings() {
+        let mut config = Config::default();
+        config.profiles.insert(
+            "P".to_owned(),
+            ProfileConfig {
+                settings: BTreeMap::from([
+                    ("editor.tabSize".to_owned(), json!(2)),
+                    ("[rust]".to_owned(), json!({"editor.formatOnSave": true})),
+                ]),
+                ..ProfileConfig::default()
+            },
+        );
+        let text = config.to_toml().unwrap();
+        let parsed: Config = toml::from_str(&text).unwrap();
+        let resolved = parsed.resolve();
+        let p = resolved.get("P").unwrap();
+        assert_eq!(p.settings.get("editor.tabSize"), Some(&json!(2)));
+        assert_eq!(p.settings.get("[rust]"), Some(&json!({"editor.formatOnSave": true})));
+    }
 }
