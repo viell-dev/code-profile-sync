@@ -75,5 +75,10 @@ Each links to the authoritative explanation in PLAN.md.
   user-visible content/commits.
 - Project paths contain spaces — quote them; never `cd` to CWD; never backslash-escape.
 - AI files (`AGENTS.md`, `CLAUDE.md`) are globally git-ignored; force-add to commit them.
-- Always rebase and fast-forward, don't create merge commits. Also use pull --rebase. This includes
-  GitHub PRs. KEEP THE HISTORY LINEAR!
+- **Branch workflow.** Make all changes on a new branch off `main` (never commit directly
+  to `main`). Commit freely as you go — multiple small commits per branch is fine. When a
+  feature is done: push the branch and open a PR. Once CI on the PR is green **and the user
+  has given permission to merge**, integrate with **rebase + fast-forward** (no merge
+  commits), then `git pull --rebase` on `main` and delete the local feature branch. Keep
+  the history linear — never rewrite history on `main`, and use `--force-with-lease` (never
+  `--force`) if a feature branch ever needs a force push.
