@@ -84,8 +84,8 @@ Near-term polish:
 - ⏳ **VSIX vendoring + `[extension_sources]` + version pinning** — switch vendored
   artifact from unpacked folder to `.vsix`, `vendor/{vsix,extensions}` split, live external
   sources, manifest-driven discovery, and first-class `id@version` pins/freeze. Designed in
-  [§4.1](#41-vsix-vendoring--extension_sources--version-pinning-designed-not-yet-implemented);
-  version pinning has open questions to resolve before implementing.
+  [§4.1](#41-vsix-vendoring--extension_sources--version-pinning-designed-not-yet-implemented).
+  Design fully decided; ready to implement in one branch.
 - ✅ **JSON Schema + `docs/config.md`** — hand-maintained `schema/config.schema.json` +
   standalone `docs/config.md`; generated configs carry a `#:schema` directive (raw URL on
   `main`); a unit test guards schema/struct drift.
@@ -669,14 +669,16 @@ questions — flagged below.
   failure. The vendor cache key **must** include `targetPlatform` (native-binary extensions
   ship `linux-x64` etc. builds) or two platforms/forks would collide on one entry.
 
-**OPEN — version pinning / freeze (solve next session).** Today pins/freeze are *not*
-exposed: `normalize_id` (config.rs) drops `@version` and lowercases, the snapshot stores no
-extension version, and `metadata.pinned` is never read. Two distinct editor concepts —
-**exact-version install** (`id@1.2.3`) and **freeze / no-auto-update** (`metadata.pinned`).
-Proposed (not final):
-- **Collapse both into `id@version`** = "install and hold this exact version," round-tripping
-  to `pinned: true` + that version. Bare `id` = floating newest, resolved version recorded
-  in the snapshot so it doesn't churn. Pull: `pinned` → `id@version`; unpinned → bare `id`.
+**Version pinning / freeze (DECIDED — ships in the same branch).** Today pins/freeze are
+*not* exposed: `normalize_id` (config.rs) drops `@version` and lowercases, the snapshot
+stores no extension version, and `metadata.pinned` is never read. Two distinct editor
+concepts — **exact-version install** (`id@1.2.3`) and **freeze / no-auto-update**
+(`metadata.pinned`). Decision:
+- **Collapse both into `id@version`** = "install and hold this exact version,"
+  round-tripping to `pinned: true` + that version. **Pinning is optional** — bare `id` =
+  latest/newest compatible, resolved version recorded in the snapshot so it doesn't churn.
+  Pull: `pinned` → `id@version`; unpinned → bare `id`. No "frozen but floating" concept
+  (rare; skipped).
 - **"Keep multiple versions" lives in the vendor store and _across_ profiles, not within
   one profile** — the editor loads one version of an id per profile, but `vendor/vsix/` (keyed
   id+version+targetPlatform) holds e.g. `1.31.2` and `1.31.7` side by side so different
@@ -686,9 +688,7 @@ Proposed (not final):
   `resolve()` precedence (profile > group > global picks the pin; `exclude_extensions` still
   matches by id), pull (capture version+pinned), push (`--install-extension id@version` +
   set the pinned flag), and the snapshot (record resolved version).
-- **Undecided:** sequencing — one branch for vsix-vendoring + version pinning together, vs.
-  land vsix vendoring first with a version-aware *store* but versionless *config*, and pins
-  as a focused follow-up. Decide before implementing.
+- **Sequencing (DECIDED):** one branch — vsix vendoring + version pinning together.
 
 ---
 
